@@ -40,6 +40,7 @@ import io
 import json
 import re
 import hashlib
+import hmac
 from typing import Dict, Any, Optional, Tuple
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import NameObject, create_string_object
@@ -52,27 +53,40 @@ def compute_sha256(data: bytes | str) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def compute_sha3_256(data: bytes | str) -> str:
+    """Computes SHA3-256 hex digest for cryptographic commitments."""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return hashlib.sha3_256(data).hexdigest()
+
+
+def derive_watermark_hmac(seed_bytes: bytes, recipient_id: str, document_hash: str) -> str:
+    """
+    Derives deterministic forensic watermark using distribution seed:
+    watermark_r = HMAC-SHA256(seed_r, recipient_id + document_hash)
+    """
+    msg = (recipient_id + document_hash).encode("utf-8")
+    return hmac.new(seed_bytes, msg, hashlib.sha256).hexdigest()
+
+
 def compute_watermark_payload(
     recipient_id: str,
-    session_nonce: str,
-    timestamp: str,
     document_hash: str,
+    watermark_hash: str,
+    timestamp: str,
+    session_nonce: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Computes canonical forensic watermark payload:
-    payload_hash = hash(recipient_id + session_nonce + timestamp + document_hash)
+    Constructs canonical forensic watermark payload with HMAC-derived watermark_hash.
     """
-    payload_str = f"{recipient_id}:{session_nonce}:{timestamp}:{document_hash}"
-    watermark_hash = compute_sha256(payload_str)
-
     return {
         "recipient_id": recipient_id,
-        "session_nonce": session_nonce,
-        "timestamp": timestamp,
         "document_hash": document_hash,
         "watermark_hash": watermark_hash,
-        "algorithm": "SHA256-FIPS-180-4",
+        "timestamp": timestamp,
+        "algorithm": "HMAC-SHA256",
     }
+
 
 
 def embed_watermark_in_pdf(pdf_bytes: bytes, watermark_payload: Dict[str, Any]) -> bytes:
@@ -98,7 +112,7 @@ def embed_watermark_in_pdf(pdf_bytes: bytes, watermark_payload: Dict[str, Any]) 
         "/ForensicWatermark": payload_json,
         "/WatermarkHash": w_hash,
         "/Subject": f"Classified Forensic Document - Hash {w_hash[:16]}",
-        "/Producer": f"Helios-PQC-ForensicEngine v2.0 ({rec_id})",
+        "/Producer": f"NayanX-PQC-ForensicEngine v2.0 ({rec_id})",
         "/Keywords": f"pqc;ml-kem-768;ml-dsa-65;wm:{w_hash}",
     }
     writer.add_metadata(metadata)
@@ -191,3 +205,53 @@ def extract_watermark_from_pdf(pdf_bytes: bytes) -> Optional[Dict[str, Any]]:
         pass
 
     return None
+
+
+def extract_watermark_hash_from_pdf(pdf_bytes: bytes) -> Optional[str]:
+    """
+    Extracts the watermark hash directly from the raw binary bytes of a leaked document.
+    Prioritizes direct byte analysis to avoid trusting any claimed or stored hashes.
+    """
+    if not pdf_bytes:
+        return None
+
+    # 1. Trailing marker block regex
+    try:
+        match = re.search(
+            rb"%FORENSIC-WATERMARK-START\r?\n%(\{.*?\})\r?\n%FORENSIC-WATERMARK-END",
+            pdf_bytes,
+            re.DOTALL,
+        )
+        if match:
+            payload = json.loads(match.group(1).decode("utf-8", errors="ignore"))
+            if "watermark_hash" in payload:
+                return str(payload["watermark_hash"])
+    except Exception:
+        pass
+
+    # 2. Direct regex search for 64-character hexadecimal watermark_hash pattern in raw bytes
+    try:
+        m = re.search(rb'["\']watermark_hash["\']\s*:\s*["\']([a-f0-9]{64})["\']', pdf_bytes, re.IGNORECASE)
+        if m:
+            return m.group(1).decode("ascii").lower()
+    except Exception:
+        pass
+
+    # 3. Direct regex search for /WatermarkHash or wm:<hash> in PDF metadata stream
+    try:
+        m = re.search(rb'/WatermarkHash\s*\(([a-f0-9]{64})\)', pdf_bytes, re.IGNORECASE)
+        if m:
+            return m.group(1).decode("ascii").lower()
+        m2 = re.search(rb'wm:([a-f0-9]{64})', pdf_bytes, re.IGNORECASE)
+        if m2:
+            return m2.group(1).decode("ascii").lower()
+    except Exception:
+        pass
+
+    # 4. Standard pypdf parser fallback
+    payload = extract_watermark_from_pdf(pdf_bytes)
+    if payload and "watermark_hash" in payload:
+        return str(payload["watermark_hash"]).lower()
+
+    return None
+

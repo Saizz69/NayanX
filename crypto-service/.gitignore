@@ -1,0 +1,20 @@
+# Data directories and keys (Air-gapped security requirement)
+data/
+*.db
+*.db-journal
+*.bin
+
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments and Secrets
+.env
+.env.*
+venv/
+.venv/

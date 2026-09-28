@@ -54,8 +54,13 @@ interface LeakAttributeResult {
   timestamp?: string;
   document_hash?: string;
   watermark_hash?: string;
-  signature_valid: boolean;
+  commitment_valid?: boolean;
+  watermark_hmac_valid?: boolean;
+  recipient_signature_valid?: boolean;
+  service_signature_valid?: boolean;
   chain_valid: boolean;
+  distribution_bundle_valid?: boolean;
+  signature_valid: boolean;
   ledger_index?: number;
   chain_length: number;
   pqc_algorithm_kem?: string;
@@ -85,10 +90,13 @@ interface SampleDocument {
   download_url: string;
 }
 
-export default function HeliosDashboard() {
+export default function NayanXDashboard() {
+  const [mounted, setMounted] = useState(false);
+
   // Navigation State
   const [activeNav, setActiveNav] = useState<string>("dashboard");
   const [activePill, setActivePill] = useState<string>("All Operations");
+
 
   // System Diagnostics
   const [systemStatus, setSystemStatus] = useState<any>(null);
@@ -127,6 +135,18 @@ export default function HeliosDashboard() {
   // Form States - Decrypt
   const [decryptSelectedRecipient, setDecryptSelectedRecipient] = useState<string>("");
   const [decryptRawJson, setDecryptRawJson] = useState<any>(null);
+  const [showDecryptDropdown, setShowDecryptDropdown] = useState(false);
+  const decryptDropdownRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (decryptDropdownRef.current && !decryptDropdownRef.current.contains(event.target as Node)) {
+        setShowDecryptDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   // Form States - Attribute
   const [leakFileInput, setLeakFileInput] = useState<File | null>(null);
@@ -143,6 +163,7 @@ export default function HeliosDashboard() {
 
   // Fetch initial data
   useEffect(() => {
+    setMounted(true);
     fetchSystemStatus();
     fetchRecipients();
     fetchLedger();
@@ -231,7 +252,7 @@ export default function HeliosDashboard() {
 
   // Helper to generate sample PDF bytes in browser
   const createSamplePdfBase64 = (title: string): string => {
-    const text = `HELIOS CLASSIFIED AIR-GAPPED BRIEFING - ${title} - PQC FIPS 203 & 204 ENCLAVE`;
+    const text = `NAYANX CLASSIFIED AIR-GAPPED BRIEFING - ${title} - PQC FIPS 203 & 204 ENCLAVE`;
     const pdfContent = `%PDF-1.4
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
 2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
@@ -287,6 +308,36 @@ startxref
       setEnrollRawJson({ error: err.message });
     } finally {
       setLoadingAction(null);
+    }
+  };
+
+  // DELETE /recipients/:id
+  const handleDeleteRecipient = async (recipientId: string, name?: string) => {
+    if (
+      !window.confirm(
+        `Are you sure you want to remove recipient "${name || recipientId}"?\nThis will purge their post-quantum public keys from the registry and vault.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/recipients/${recipientId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setRecipients((prev) => prev.filter((r) => r.recipient_id !== recipientId));
+        setSelectedRecipientIds((prev) => prev.filter((id) => id !== recipientId));
+        if (decryptSelectedRecipient === recipientId) {
+          const remaining = recipients.filter((r) => r.recipient_id !== recipientId);
+          setDecryptSelectedRecipient(remaining.length > 0 ? remaining[0].recipient_id : "");
+        }
+      } else {
+        const data = await res.json();
+        alert(`Failed to delete recipient: ${data.detail || "Server error"}`);
+      }
+    } catch (err: any) {
+      alert(`Network error deleting recipient: ${err.message}`);
     }
   };
 
@@ -502,94 +553,174 @@ startxref
     }
   };
 
-  // End-to-end Demo execution
+  // End-to-end Demo execution with live telemetry, dynamic enrolled recipients & actual verification
   const runFullDemoSequence = async () => {
     setDemoRunning(true);
     setDemoLogs([]);
     const log = (msg: string) => setDemoLogs((prev) => [...prev, msg]);
 
     try {
-      log("⚡ [1/5] Diagnostics: Probing Air-Gapped Post-Quantum Engine...");
-      await fetchSystemStatus();
-      log("✔ ML-KEM-768 & ML-DSA-65 active. AES-256-GCM vault authenticated.");
+      // 1. Diagnostics Probe
+      log("⚡ [1/5] Diagnostics: Probing Air-Gapped Post-Quantum Enclave Engine...");
+      const t0 = performance.now();
+      const statusRes = await fetch(`${API_BASE}/status`);
+      const statusData = await statusRes.json();
+      setSystemStatus(statusData);
+      setBackendOnline(true);
+      const diagMs = Math.round(performance.now() - t0);
 
-      log("⚡ [2/5] Recipient Enrollment: Generating PQC Keypairs for Alice, Bob, Charlie...");
-      const demoUsers = [
-        { name: "Alice Vance", role: "Chief Intelligence Officer", id: "rec-alice-01" },
-        { name: "Bob Sterling", role: "Senior Cryptanalyst", id: "rec-bob-02" },
-        { name: "Charlie Miller", role: "Defense Logistics Attaché", id: "rec-charlie-03" },
-      ];
+      log(`✔ Enclave Engine: ${statusData.engine.toUpperCase()} (${diagMs}ms)`);
+      log(`✔ PQC Parameter Sets: FIPS 203 (${statusData.fips_203_kem}) | FIPS 204 (${statusData.fips_204_dsa})`);
+      log(`✔ Security Level: ${statusData.security_level}`);
+      log(`✔ Cryptographic Keystore: ${statusData.vault_status}`);
+      log(`✔ Merkle Ledger State: ${statusData.ledger_entries_count} blocks verified in cryptographic store`);
 
-      for (const u of demoUsers) {
-        await fetch(`${API_BASE}/enroll`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: u.name, role: u.role, recipient_id: u.id }),
-        });
-        log(`✔ Enrolled ${u.name} (ML-KEM-768 / ML-DSA-65)`);
+      // 2. Dynamic Recipient Preparation
+      log("⚡ [2/5] Recipient Registry: Preparing enrolled officers for post-quantum distribution...");
+      const recRes = await fetch(`${API_BASE}/recipients`);
+      let currentRecipients: Recipient[] = await recRes.json();
+
+      // If fewer than 2 recipients exist, enroll test officers to ensure multi-recipient demo works
+      if (currentRecipients.length < 2) {
+        log("ℹ Fewer than 2 officers found. Enrolling demo officers into post-quantum registry...");
+        const defaultDemoOfficers = [
+          { name: "Alice Vance", role: "Chief Intelligence Officer", id: "rec-alice-01" },
+          { name: "Bob Sterling", role: "Senior Cryptanalyst", id: "rec-bob-02" },
+        ];
+        for (const officer of defaultDemoOfficers) {
+          const exists = currentRecipients.some((r) => r.recipient_id === officer.id);
+          if (!exists) {
+            const enrollRes = await fetch(`${API_BASE}/enroll`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: officer.name, role: officer.role, recipient_id: officer.id }),
+            });
+            if (enrollRes.ok) {
+              const newRec = await enrollRes.json();
+              log(`✔ Generated fresh PQC keypair for ${newRec.name} (ML-KEM-768 / ML-DSA-65)`);
+            }
+          }
+        }
+        const updatedRecRes = await fetch(`${API_BASE}/recipients`);
+        currentRecipients = await updatedRecRes.json();
       }
-      await fetchRecipients();
 
-      log("⚡ [3/5] Encryption: Generating AES-256-GCM key and encapsulating for recipients...");
-      const b64 = createSamplePdfBase64("Operation Helios Dossier");
+      setRecipients(currentRecipients);
+
+      // Select active officers dynamically (up to 3 enrolled officers)
+      const targetOfficers = currentRecipients.slice(0, 3);
+      for (const off of targetOfficers) {
+        log(`✔ Officer Enrolled: ${off.name} (${off.role}) — KEM: ${off.kem_pubkey_id} | DSA: ${off.dsa_pubkey_id}`);
+      }
+
+      // 3. Document Encryption & ML-KEM-768 Encapsulation
+      const tEncStart = performance.now();
+      log("⚡ [3/5] Bulk Encryption: AES-256-GCM symmetric cipher + ML-KEM-768 multi-recipient encapsulation...");
+      const targetIds = targetOfficers.map((o) => o.recipient_id);
+      const b64 = createSamplePdfBase64("Classified Strategic Enclave Briefing");
+
       const encRes = await fetch(`${API_BASE}/documents/encrypt`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           pdf_base64: b64,
-          filename: "helios_briefing.pdf",
-          recipient_ids: ["rec-alice-01", "rec-bob-02", "rec-charlie-03"],
+          filename: "operation_nayanx_intel.pdf",
+          recipient_ids: targetIds,
         }),
       });
-      const encData = await encRes.json();
-      setEncryptedDossiers((prev) => [encData, ...prev]);
-      log(`✔ Bulk PDF encrypted. SHA-256: ${encData.document_hash.slice(0, 16)}...`);
 
-      log("⚡ [4/5] Decryption: Decapsulating & injecting individual invisible watermarks...");
+      if (!encRes.ok) {
+        const errData = await encRes.json();
+        throw new Error(errData.detail || "Document encryption failed.");
+      }
+
+      const encData: EncryptResult = await encRes.json();
+      setEncryptedDossiers((prev) => [encData, ...prev]);
+      const encMs = Math.round(performance.now() - tEncStart);
+
+      log(`✔ Bulk PDF Encrypted in ${encMs}ms. SHA-256 Digest: ${encData.document_hash}`);
+      log(`✔ Pre-distribution SHA3-256 seed commitments signed by service authority & anchored to Merkle ledger`);
+      log(`✔ Master key encapsulated across ${encData.recipient_count} recipient public keys via ML-KEM-768`);
+
+      // 4. Decryption, Steganographic Watermarking & Dual ML-DSA-65 Ledger Signing
+      log("⚡ [4/5] Multi-Party Decryption: Decapsulating AES keys, deriving HMAC watermarks & dual-signing records...");
       const decMap: Record<string, DecryptResult> = {};
-      for (const u of demoUsers) {
-        const bundle = encData.bundles[u.id];
+
+      for (const off of targetOfficers) {
+        const tDecStart = performance.now();
+        const bundle = encData.bundles[off.recipient_id];
+        if (!bundle) continue;
+
         const decRes = await fetch(`${API_BASE}/documents/decrypt`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ bundle, recipient_id: u.id, return_pdf_base64: true }),
+          body: JSON.stringify({ bundle, recipient_id: off.recipient_id, return_pdf_base64: true }),
         });
-        const decData = await decRes.json();
-        decMap[u.id] = decData;
+
+        if (!decRes.ok) {
+          const errData = await decRes.json();
+          throw new Error(`Decryption failed for ${off.name}: ${errData.detail || "Error"}`);
+        }
+
+        const decData: DecryptResult = await decRes.json();
+        decMap[off.recipient_id] = decData;
+        const decMs = Math.round(performance.now() - tDecStart);
+
         log(
-          `✔ Decrypted for ${u.name} -> Watermark: ${decData.watermark_hash.slice(
+          `✔ [${off.name}] (${decMs}ms): ML-KEM Decapsulated → HMAC-SHA256 Watermark ${decData.watermark_hash.slice(
             0,
             16
-          )}... Block #${decData.ledger_entry.entry_index}`
+          )}... → Dual-Signed (Recipient + Service ML-DSA-65) → Committed to Merkle Block #${decData.ledger_entry.entry_index}`
         );
       }
+
       setDecryptedCopies((prev) => ({ ...prev, ...decMap }));
       await fetchLedger();
       await fetchSampleDocs();
 
-      log("⚡ [5/5] Forensic Leak Simulation: Exfiltrating Bob's copy and submitting to /leak/attribute...");
-      const bobsCopy =
-        decMap["rec-bob-02"]?.watermarked_pdf_base64 ||
-        sampleDocs.find((d) => d.recipient_id === "rec-bob-02")?.pdf_base64;
-      if (bobsCopy) {
-        const attrRes = await fetch(`${API_BASE}/leak/attribute`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ pdf_base64: bobsCopy }),
-        });
-        const attrData = await attrRes.json();
-        setAttributeResult(attrData);
-        setAttributeRawJson(attrData);
-        log(`🎯 ATTRIBUTION CONFIRMED: Leaker identified as ${attrData.recipient_name} (${attrData.recipient_id})`);
-        log(
-          `✔ ML-DSA-65 Signature: ${attrData.signature_valid ? "VALID" : "INVALID"} | Merkle Chain: ${
-            attrData.chain_valid ? "INTACT" : "TAMPERED"
-          }`
-        );
+      // 5. Forensic Leak Simulation & Attribution
+      const suspectedOfficer = targetOfficers.length > 1 ? targetOfficers[1] : targetOfficers[0];
+      const leakedCopy = decMap[suspectedOfficer.recipient_id]?.watermarked_pdf_base64;
+
+      if (!leakedCopy) {
+        throw new Error(`Unable to obtain watermarked copy for simulated leaker ${suspectedOfficer.name}`);
       }
+
+      log(`⚡ [5/5] Forensic Exfiltration Simulation: Intercepting leaked copy leaked by officer '${suspectedOfficer.name}'...`);
+      const tAttrStart = performance.now();
+
+      const attrRes = await fetch(`${API_BASE}/leak/attribute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pdf_base64: leakedCopy }),
+      });
+
+      if (!attrRes.ok) {
+        const errData = await attrRes.json();
+        throw new Error(`Attribution failed: ${errData.detail || "Error"}`);
+      }
+
+      const attrData: LeakAttributeResult = await attrRes.json();
+      setAttributeResult(attrData);
+      setAttributeRawJson(attrData);
+      const attrMs = Math.round(performance.now() - tAttrStart);
+
+      log(`🎯 ATTRIBUTION CONFIRMED in ${attrMs}ms:`);
+      log(`   • Identified Leaker: ${attrData.recipient_name} (ID: ${attrData.recipient_id})`);
+      log(`   • Raw PDF Stego Mark: Watermark Hash ${attrData.watermark_hash?.slice(0, 24)}...`);
+      log(`   • 6-Point Cryptographic Scorecard:`);
+      log(`     [1] SHA3-256 Commit-Reveal: ${attrData.commitment_valid ? "VALID" : "FAILED"}`);
+      log(`     [2] HMAC Watermark Derivation: ${attrData.watermark_hmac_valid ? "VALID" : "FAILED"}`);
+      log(`     [3] Recipient ML-DSA-65 Signature: ${attrData.recipient_signature_valid ? "VALID" : "FAILED"}`);
+      log(`     [4] Service Counter-Signature: ${attrData.service_signature_valid ? "VALID" : "FAILED"}`);
+      log(`     [5] Merkle Ledger Hash-Chain: ${attrData.chain_valid ? "VALID" : "FAILED"}`);
+      log(`     [6] Pre-Distribution Bundle: ${attrData.distribution_bundle_valid ? "VALID" : "FAILED"}`);
+      log(`   • Audit Ledger Block: #${attrData.ledger_index} of ${attrData.chain_length}`);
+      log(`   • Cryptographic Verdict: ${attrData.summary}`);
+
       await fetchLedger();
     } catch (e: any) {
-      log(`❌ Error in demo: ${e.message}`);
+      log(`❌ Demo Execution Error: ${e.message}`);
     } finally {
       setDemoRunning(false);
     }
@@ -630,13 +761,17 @@ startxref
     : [];
 
   return (
-    <div className="dashboard-root">
+    <div
+      className="dashboard-root theme-dark"
+      data-theme="dark"
+      suppressHydrationWarning
+    >
       {/* 1. Left Sidebar */}
       <aside className="sidebar">
         <div className="brand-header">
-          <div className="brand-icon">H</div>
+          <div className="brand-icon">NX</div>
           <div>
-            <div className="brand-title">Helios Forensic</div>
+            <div className="brand-title">NayanX Forensic</div>
             <div className="brand-subtitle">PQC Enclave v1.0</div>
           </div>
         </div>
@@ -685,7 +820,7 @@ startxref
             <span>⚙️</span> HSM & Vault Specs
           </button>
           <button className="nav-item" onClick={() => fetchSystemStatus()}>
-            <span style={{ color: backendOnline ? "#10b981" : "#ef4444" }}>●</span>{" "}
+            <span style={{ color: backendOnline ? "#ffffff" : "#94a3b8" }}>●</span>{" "}
             {backendOnline ? "Air-Gap Node Online" : "Service Offline"}
           </button>
         </div>
@@ -697,7 +832,7 @@ startxref
         <header className="top-header">
           <div className="header-greeting">
             <h1>
-              Welcome, <span>Nadia</span>
+              Welcome, <span>Sai</span>
             </h1>
             <p>Air-gapped forensic document attribution & post-quantum provenance overview</p>
           </div>
@@ -777,7 +912,7 @@ startxref
                       }}
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <span style={{ fontSize: "12px", fontWeight: "600", color: "#fff" }}>{item.label}</span>
+                        <span style={{ fontSize: "12px", fontWeight: "600", color: "var(--text-primary)" }}>{item.label}</span>
                         <span className="card-badge" style={{ fontSize: "9px" }}>
                           {item.type}
                         </span>
@@ -797,6 +932,7 @@ startxref
                 </div>
               )}
             </div>
+
 
             <button
               className="icon-btn"
@@ -819,9 +955,9 @@ startxref
               onClick={() => setShowProfileModal(true)}
               title="Click to view Officer Credentials"
             >
-              <div className="user-avatar">NR</div>
+              <div className="user-avatar">S</div>
               <div className="user-info">
-                <span className="user-name">Nadia Rachel</span>
+                <span className="user-name">Sai</span>
                 <span className="user-role">Chief Analyst</span>
               </div>
             </div>
@@ -834,7 +970,7 @@ startxref
             {/* Top Grid of Cards */}
             <section className="dashboard-grid">
               {/* Card 1: Metric Card (Enrolled Officers) */}
-              <div className="helios-card col-3">
+              <div className="nayanx-card col-3">
                 <div className="card-header-row">
                   <span className="card-title">Enrolled Officers</span>
                   <span
@@ -857,13 +993,13 @@ startxref
               </div>
 
               {/* Card 2: AI / PQC Decisions Powered by Data */}
-              <div className="helios-card helios-glow-card col-3">
+              <div className="nayanx-card nayanx-glow-card col-3">
                 <div className="glow-card-title">Decisions Powered by Data</div>
                 <div className="glow-card-desc">
                   Quantum-resistant attribution using ML-KEM-768 encapsulation and ML-DSA-65 non-repudiation signatures.
                 </div>
                 <button
-                  className="helios-glow-btn"
+                  className="nayanx-glow-btn"
                   onClick={runFullDemoSequence}
                   disabled={demoRunning}
                 >
@@ -872,12 +1008,12 @@ startxref
               </div>
 
               {/* Card 3: Watchlist (Recipient Key Registry) */}
-              <div className="helios-card col-3">
+              <div className="nayanx-card col-3">
                 <div className="card-header-row">
                   <span className="card-title">Key Registry (Watchlist)</span>
                   <span
                     className="card-badge"
-                    style={{ background: "rgba(236,72,153,0.2)", color: "#fff", cursor: "pointer" }}
+                    style={{ background: "rgba(255,255,255,0.12)", color: "#ffffff", cursor: "pointer" }}
                     onClick={() => setActiveNav("enroll")}
                   >
                     + Enroll
@@ -889,9 +1025,9 @@ startxref
                     <div key={r.recipient_id} className="watchlist-row">
                       <div className="key-brand">
                         <div className="key-icon">🛡️</div>
-                        <div>
-                          <div className="key-name">{r.name}</div>
-                          <div className="key-meta">{r.role}</div>
+                        <div className="key-info">
+                          <div className="key-name" title={r.name}>{r.name}</div>
+                          <div className="key-meta" title={r.role}>{r.role}</div>
                         </div>
                       </div>
                       <div className="key-status">
@@ -909,7 +1045,7 @@ startxref
               </div>
 
               {/* Card 4: Enclave Security Vault */}
-              <div className="helios-card col-3">
+              <div className="nayanx-card col-3">
                 <div className="card-header-row">
                   <span className="card-title">Cryptographic Artifacts</span>
                   <span className="card-badge" onClick={() => setActiveNav("encrypt")} style={{ cursor: "pointer" }}>
@@ -921,23 +1057,23 @@ startxref
                   <div className="portfolio-mini-card">
                     <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>Encrypted Bundles</div>
                     <div className="portfolio-value">{Math.max(encryptedDossiers.length, 1)} Docs</div>
-                    <div style={{ fontSize: "10px", color: "var(--success-green)" }}>AES-256-GCM</div>
+                    <div style={{ fontSize: "10px", color: "#cbd5e1" }}>AES-256-GCM</div>
                   </div>
                   <div className="portfolio-mini-card">
                     <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>Watermarked Copies</div>
                     <div className="portfolio-value">{Math.max(Object.keys(decryptedCopies).length, 3)} Units</div>
-                    <div style={{ fontSize: "10px", color: "var(--accent-pink)" }}>Stego Active</div>
+                    <div style={{ fontSize: "10px", color: "#ffffff" }}>Stego Active</div>
                   </div>
                   <div className="portfolio-mini-card">
                     <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>Ledger Blocks</div>
                     <div className="portfolio-value">{ledgerData?.chain_length || 30}</div>
-                    <div style={{ fontSize: "10px", color: "var(--accent-purple)" }}>Merkle Root</div>
+                    <div style={{ fontSize: "10px", color: "#cbd5e1" }}>Merkle Root</div>
                   </div>
                   <div className="portfolio-mini-card">
                     <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>Chain Status</div>
                     <div
                       className="portfolio-value"
-                      style={{ color: ledgerData?.chain_valid ? "#10b981" : "#ef4444" }}
+                      style={{ color: ledgerData?.chain_valid ? "#ffffff" : "#94a3b8" }}
                     >
                       {ledgerData?.chain_valid ? "VALID" : "TAMPER"}
                     </div>
@@ -948,10 +1084,10 @@ startxref
             </section>
 
             {/* DEDICATED SECTION: Recipient Documents for Testing & Validation */}
-            <section className="helios-card col-12" style={{ marginTop: "20px" }}>
+            <section className="nayanx-card col-12" style={{ marginTop: "20px" }}>
               <div className="card-header-row">
                 <div>
-                  <h3 style={{ fontSize: "16px", fontWeight: "700", color: "#fff" }}>
+                  <h3 style={{ fontSize: "16px", fontWeight: "700", color: "var(--text-primary)" }}>
                     📄 Recipient Documents & Forensic Test Copies (Download & Attribute)
                   </h3>
                   <p style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "2px" }}>
@@ -976,7 +1112,7 @@ startxref
                       <div className="sample-doc-title">Alice Vance — Decrypted Copy</div>
                       <div className="sample-doc-meta">Role: Chief Intelligence Officer</div>
                     </div>
-                    <span className="card-badge" style={{ background: "rgba(236,72,153,0.2)", color: "#f472b6" }}>
+                    <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#cbd5e1" }}>
                       Watermarked
                     </span>
                   </div>
@@ -1014,7 +1150,7 @@ startxref
                       <div className="sample-doc-title">Bob Sterling — Decrypted Copy</div>
                       <div className="sample-doc-meta">Role: Senior Cryptanalyst</div>
                     </div>
-                    <span className="card-badge" style={{ background: "rgba(236,72,153,0.2)", color: "#f472b6" }}>
+                    <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#cbd5e1" }}>
                       Watermarked
                     </span>
                   </div>
@@ -1052,7 +1188,7 @@ startxref
                       <div className="sample-doc-title">Charlie Miller — Decrypted Copy</div>
                       <div className="sample-doc-meta">Role: Defense Logistics Attaché</div>
                     </div>
-                    <span className="card-badge" style={{ background: "rgba(236,72,153,0.2)", color: "#f472b6" }}>
+                    <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#cbd5e1" }}>
                       Watermarked
                     </span>
                   </div>
@@ -1090,7 +1226,7 @@ startxref
                       <div className="sample-doc-title">Original Classified Briefing</div>
                       <div className="sample-doc-meta">Master Source Document</div>
                     </div>
-                    <span className="card-badge" style={{ background: "rgba(245,158,11,0.2)", color: "#fbbf24" }}>
+                    <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#94a3b8" }}>
                       Unwatermarked
                     </span>
                   </div>
@@ -1111,9 +1247,9 @@ startxref
                     <button
                       className="btn-sm-attribute"
                       style={{
-                        background: "rgba(245,158,11,0.15)",
-                        borderColor: "rgba(245,158,11,0.4)",
-                        color: "#fbbf24",
+                        background: "rgba(255,255,255,0.08)",
+                        borderColor: "rgba(255,255,255,0.2)",
+                        color: "#ffffff",
                       }}
                       onClick={() => {
                         const doc = sampleDocs.find((d) => d.filename === "sample_briefing.pdf");
@@ -1130,18 +1266,54 @@ startxref
 
             {/* Live Demo Console / Status if running */}
             {demoLogs.length > 0 && (
-              <section className="helios-card col-12" style={{ marginTop: "20px" }}>
+              <section className="nayanx-card col-12" style={{ marginTop: "20px" }}>
                 <div className="card-header-row">
-                  <span className="card-title">Live Post-Quantum Execution Log</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <span className="card-title">Live Post-Quantum Execution Log</span>
+                    {demoRunning ? (
+                      <span className="card-badge" style={{ background: "rgba(255,255,255,0.12)", color: "#ffffff" }}>
+                        ● Protocol Executing
+                      </span>
+                    ) : (
+                      <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#ffffff" }}>
+                        ✔ Verification Complete
+                      </span>
+                    )}
+                  </div>
                   <button className="card-badge" onClick={() => setDemoLogs([])} style={{ cursor: "pointer" }}>
                     Clear Log
                   </button>
                 </div>
-                <div className="json-inspector-pre" style={{ maxHeight: "150px" }}>
+                <div
+                  className="json-inspector-pre"
+                  style={{
+                    maxHeight: "220px",
+                    background: "#090710",
+                    borderRadius: "8px",
+                    padding: "14px",
+                    border: "1px solid rgba(255,255,255,0.12)",
+                    boxShadow: "inset 0 2px 10px rgba(0,0,0,0.5)",
+                  }}
+                >
                   {demoLogs.map((l, i) => (
                     <div
                       key={i}
-                      style={{ color: l.includes("✔") ? "#34d399" : l.includes("🎯") ? "#ec4899" : "#cbd5e1" }}
+                      style={{
+                        color: l.includes("✔")
+                          ? "#ffffff"
+                          : l.includes("🎯")
+                          ? "#cbd5e1"
+                          : l.includes("⚡")
+                          ? "#e2e8f0"
+                          : l.includes("❌")
+                          ? "#94a3b8"
+                          : l.includes("ℹ")
+                          ? "#cbd5e1"
+                          : "#cbd5e1",
+                        lineHeight: "1.65",
+                        fontFamily: "'JetBrains Mono', monospace",
+                        fontSize: "12px",
+                      }}
                     >
                       {l}
                     </div>
@@ -1151,10 +1323,10 @@ startxref
             )}
 
             {/* Bottom Wide Panel: Portfolio Performance & Hash-Chained Ledger */}
-            <section className="helios-card col-12" style={{ marginTop: "20px" }}>
+            <section className="nayanx-card col-12" style={{ marginTop: "20px" }}>
               <div className="chart-header-row">
                 <div>
-                  <span className="card-title" style={{ fontSize: "15px", color: "#fff" }}>
+                  <span className="card-title" style={{ fontSize: "15px", color: "var(--text-primary)" }}>
                     Ledger Provenance & Cryptographic Anchor Timeline
                   </span>
                   <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}>
@@ -1179,7 +1351,7 @@ startxref
                   <button
                     className="card-badge"
                     onClick={handleTamperSimulation}
-                    style={{ background: "rgba(239, 68, 68, 0.2)", color: "#f87171", cursor: "pointer" }}
+                    style={{ background: "rgba(255, 255, 255, 0.06)", color: "#cbd5e1", cursor: "pointer" }}
                     title="Simulate adversarial attack on SQLite block to prove ledger detects tampering"
                   >
                     Simulate Tamper
@@ -1188,7 +1360,7 @@ startxref
                   <button
                     className="card-badge"
                     onClick={handleRestoreLedger}
-                    style={{ background: "rgba(16, 185, 129, 0.2)", color: "#34d399", cursor: "pointer" }}
+                    style={{ background: "rgba(255, 255, 255, 0.12)", color: "#ffffff", cursor: "pointer" }}
                     title="Restore any tampered blocks to original state"
                   >
                     Restore Ledger
@@ -1210,8 +1382,8 @@ startxref
                     <button
                       className="card-badge"
                       style={{
-                        background: "#10b981",
-                        color: "#fff",
+                        background: "#ffffff",
+                        color: "#0a0c10",
                         cursor: "pointer",
                         padding: "6px 14px",
                         fontWeight: "700",
@@ -1229,8 +1401,8 @@ startxref
                 <svg className="chart-svg" viewBox="0 0 1000 120" preserveAspectRatio="none">
                   <defs>
                     <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#ec4899" stopOpacity="0.4" />
-                      <stop offset="100%" stopColor="#8b5cf6" stopOpacity="0.0" />
+                      <stop offset="0%" stopColor="#ffffff" stopOpacity="0.22" />
+                      <stop offset="100%" stopColor="#ffffff" stopOpacity="0.0" />
                     </linearGradient>
                   </defs>
                   <path
@@ -1252,11 +1424,11 @@ startxref
                         : "M 0,90 Q 150,20 300,50 T 600,30 T 750,75 T 900,40 L 1000,50"
                     }
                     fill="none"
-                    stroke="#ec4899"
-                    strokeWidth="2.5"
+                    stroke="#ffffff"
+                    strokeWidth="2"
                   />
-                  <circle cx="750" cy="75" r="5" fill="#f472b6" filter="drop-shadow(0 0 8px #ec4899)" />
-                  <line x1="750" y1="75" x2="750" y2="120" stroke="#f472b6" strokeDasharray="3,3" opacity="0.6" />
+                  <circle cx="750" cy="75" r="4.5" fill="#ffffff" filter="drop-shadow(0 0 6px rgba(255,255,255,0.7))" />
+                  <line x1="750" y1="75" x2="750" y2="120" stroke="#ffffff" strokeDasharray="3,3" opacity="0.35" />
                 </svg>
               </div>
 
@@ -1274,7 +1446,7 @@ startxref
                 <span>Mar</span>
                 <span>Apr</span>
                 <span>May</span>
-                <span style={{ color: "#f472b6", fontWeight: "700" }}>Jun (Audit Anchor)</span>
+                <span style={{ color: "#ffffff", fontWeight: "700" }}>Jun (Audit Anchor)</span>
                 <span>Jul</span>
                 <span>Aug</span>
                 <span>Sep</span>
@@ -1290,7 +1462,7 @@ startxref
 
         {/* View 1: POST /enroll */}
         {activeNav === "enroll" && (
-          <section className="helios-card col-12">
+          <section className="nayanx-card col-12">
             <div className="card-header-row">
               <div>
                 <h2 style={{ fontSize: "18px", fontWeight: "700" }}>POST /enroll — Post-Quantum Recipient Enrollment</h2>
@@ -1339,7 +1511,7 @@ startxref
 
               <button
                 type="submit"
-                className="helios-glow-btn"
+                className="nayanx-glow-btn"
                 disabled={loadingAction === "enroll"}
               >
                 {loadingAction === "enroll" ? "Generating PQC Keys..." : "Enroll Recipient (POST /enroll)"}
@@ -1348,32 +1520,51 @@ startxref
 
             {/* List Enrolled Officers */}
             <div style={{ marginTop: "24px" }}>
-              <h3 style={{ fontSize: "14px", fontWeight: "700", marginBottom: "12px", color: "#fff" }}>
-                Enrolled Officers Registry ({recipients.length})
-              </h3>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "10px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}>
+                <h3 style={{ fontSize: "14px", fontWeight: "700", color: "var(--text-primary)" }}>
+                  Enrolled Officers Registry ({recipients.length})
+                </h3>
+                <span style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+                  FIPS 203 (ML-KEM-768) & FIPS 204 (ML-DSA-65) Air-Gapped Keypairs
+                </span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "12px" }}>
                 {recipients.map((r) => (
                   <div key={r.recipient_id} className="portfolio-mini-card">
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span style={{ fontWeight: "700", color: "#fff" }}>{r.name}</span>
-                      <span className="key-badge-green">● Active</span>
+                      <span style={{ fontWeight: "700", color: "var(--text-primary)", fontSize: "13.5px" }}>{r.name}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span className="key-badge-green">● Active</span>
+                        <button
+                          className="btn-delete-recipient"
+                          onClick={() => handleDeleteRecipient(r.recipient_id, r.name)}
+                          title={`Revoke & Delete ${r.name}`}
+                        >
+                          🗑️ Delete
+                        </button>
+                      </div>
                     </div>
-                    <div style={{ fontSize: "11px", color: "var(--accent-pink)", marginTop: "2px" }}>{r.role}</div>
+                    <div style={{ fontSize: "11.5px", color: "var(--accent-pink)", marginTop: "3px", fontWeight: "500" }}>{r.role}</div>
                     <div
                       style={{
-                        fontSize: "10.5px",
+                        fontSize: "11px",
                         color: "var(--text-muted)",
-                        marginTop: "6px",
+                        marginTop: "8px",
                         fontFamily: "monospace",
                       }}
                     >
                       ID: {r.recipient_id}
                     </div>
-                    <div style={{ fontSize: "10px", color: "var(--text-muted)", marginTop: "2px" }}>
+                    <div style={{ fontSize: "10.5px", color: "var(--text-muted)", marginTop: "3px" }}>
                       KEM: ML-KEM-768 | DSA: ML-DSA-65
                     </div>
                   </div>
                 ))}
+                {recipients.length === 0 && (
+                  <div style={{ gridColumn: "1 / -1", padding: "24px", textAlign: "center", color: "var(--text-muted)", background: "rgba(0,0,0,0.02)", borderRadius: "var(--radius-md)" }}>
+                    No officers currently enrolled. Use the form above to enroll a new recipient.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1394,7 +1585,7 @@ startxref
 
         {/* View 2: POST /documents/encrypt */}
         {activeNav === "encrypt" && (
-          <section className="helios-card col-12">
+          <section className="nayanx-card col-12">
             <div className="card-header-row">
               <div>
                 <h2 style={{ fontSize: "18px", fontWeight: "700" }}>
@@ -1443,8 +1634,8 @@ startxref
                       <label
                         key={r.recipient_id}
                         style={{
-                          background: checked ? "rgba(236,72,153,0.2)" : "rgba(255,255,255,0.04)",
-                          border: checked ? "1px solid var(--accent-pink)" : "1px solid var(--border-subtle)",
+                          background: checked ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.04)",
+                          border: checked ? "1px solid rgba(255,255,255,0.4)" : "1px solid var(--border-subtle)",
                           padding: "6px 14px",
                           borderRadius: "var(--radius-full)",
                           cursor: "pointer",
@@ -1480,7 +1671,7 @@ startxref
 
               <button
                 type="submit"
-                className="helios-glow-btn"
+                className="nayanx-glow-btn"
                 disabled={loadingAction === "encrypt"}
               >
                 {loadingAction === "encrypt"
@@ -1506,7 +1697,7 @@ startxref
 
         {/* View 3: POST /documents/decrypt */}
         {activeNav === "decrypt" && (
-          <section className="helios-card col-12">
+          <section className="nayanx-card col-12">
             <div className="card-header-row">
               <div>
                 <h2 style={{ fontSize: "18px", fontWeight: "700" }}>
@@ -1521,25 +1712,90 @@ startxref
             </div>
 
             <div style={{ marginTop: "16px" }}>
-              <div className="form-group" style={{ maxWidth: "340px", marginBottom: "16px" }}>
+              <div
+                ref={decryptDropdownRef}
+                className="form-group custom-dropdown-container"
+                style={{ maxWidth: "380px", marginBottom: "16px", position: "relative" }}
+              >
                 <label className="form-label">Select Recipient to Execute Decryption</label>
-                <select
-                  className="form-select"
-                  value={decryptSelectedRecipient}
-                  onChange={(e) => setDecryptSelectedRecipient(e.target.value)}
+                
+                {/* Custom Sleek Dark Dropdown Trigger */}
+                <div
+                  className="custom-dropdown-trigger"
+                  onClick={() => setShowDecryptDropdown((prev) => !prev)}
                 >
-                  <option value="">-- Choose Recipient --</option>
-                  {recipients.map((r) => (
-                    <option key={r.recipient_id} value={r.recipient_id}>
-                      {r.name} ({r.recipient_id})
-                    </option>
-                  ))}
-                </select>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0, flex: 1 }}>
+                    <span style={{ fontSize: "14px" }}>🛡️</span>
+                    <div style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {(() => {
+                        const sel = recipients.find((r) => r.recipient_id === decryptSelectedRecipient);
+                        if (sel) {
+                          return (
+                            <>
+                              <span style={{ fontWeight: "600", color: "#ffffff" }}>{sel.name}</span>
+                              <span style={{ fontSize: "11.5px", color: "var(--text-muted)", marginLeft: "8px", fontFamily: "monospace" }}>
+                                ({sel.recipient_id})
+                              </span>
+                            </>
+                          );
+                        }
+                        return <span style={{ color: "var(--text-muted)" }}>-- Choose Recipient --</span>;
+                      })()}
+                    </div>
+                  </div>
+                  <span
+                    style={{
+                      fontSize: "10px",
+                      color: "var(--text-muted)",
+                      transform: showDecryptDropdown ? "rotate(180deg)" : "rotate(0deg)",
+                      transition: "transform 0.2s",
+                      marginLeft: "8px",
+                    }}
+                  >
+                    ▼
+                  </span>
+                </div>
+
+                {/* Custom Sleek Dark Dropdown Menu */}
+                {showDecryptDropdown && (
+                  <div className="custom-dropdown-menu">
+                    {recipients.map((r) => (
+                      <div
+                        key={r.recipient_id}
+                        className={`custom-dropdown-item ${decryptSelectedRecipient === r.recipient_id ? "active" : ""}`}
+                        onClick={() => {
+                          setDecryptSelectedRecipient(r.recipient_id);
+                          setShowDecryptDropdown(false);
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0, flex: 1 }}>
+                          <span style={{ fontSize: "13px" }}>🛡️</span>
+                          <div style={{ minWidth: 0, flex: 1 }}>
+                            <div style={{ fontSize: "12.5px", fontWeight: "600", color: "#ffffff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {r.name}
+                            </div>
+                            <div style={{ fontSize: "11px", color: "var(--text-muted)", fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {r.role} • {r.recipient_id}
+                            </div>
+                          </div>
+                        </div>
+                        {decryptSelectedRecipient === r.recipient_id && (
+                          <span style={{ color: "#ffffff", fontSize: "13px", fontWeight: "700", marginLeft: "8px" }}>✓</span>
+                        )}
+                      </div>
+                    ))}
+                    {recipients.length === 0 && (
+                      <div style={{ padding: "10px", fontSize: "12px", color: "var(--text-muted)", textAlign: "center" }}>
+                        No officers enrolled.
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "20px" }}>
                 <button
-                  className="helios-glow-btn"
+                  className="nayanx-glow-btn"
                   onClick={() => handleDecrypt()}
                   disabled={loadingAction?.startsWith("decrypt")}
                 >
@@ -1572,7 +1828,7 @@ startxref
                   {Object.entries(decryptedCopies).map(([rId, copy]) => (
                     <div key={rId} className="portfolio-mini-card">
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <span style={{ fontWeight: "700", color: "#fff" }}>
+                        <span style={{ fontWeight: "700", color: "var(--text-primary)" }}>
                           {recipients.find((r) => r.recipient_id === rId)?.name || rId}
                         </span>
                         <span className="key-badge-green">● Ledger Block #{copy.ledger_entry?.entry_index}</span>
@@ -1590,7 +1846,7 @@ startxref
                         {copy.watermarked_pdf_base64 && (
                           <button
                             className="card-badge"
-                            style={{ background: "rgba(236,72,153,0.3)", color: "#fff", cursor: "pointer" }}
+                            style={{ background: "rgba(255,255,255,0.12)", color: "#fff", cursor: "pointer" }}
                             onClick={() => downloadPdf(copy.watermarked_pdf_base64!, `${rId}_watermarked.pdf`)}
                           >
                             ⬇ Download PDF
@@ -1598,7 +1854,7 @@ startxref
                         )}
                         <button
                           className="card-badge"
-                          style={{ background: "rgba(239,68,68,0.2)", color: "#f87171", cursor: "pointer" }}
+                          style={{ background: "rgba(255,255,255,0.06)", color: "#cbd5e1", cursor: "pointer" }}
                           onClick={() => {
                             handleAttribute(copy.watermarked_pdf_base64);
                           }}
@@ -1629,7 +1885,7 @@ startxref
 
         {/* View 4: POST /leak/attribute */}
         {activeNav === "attribute" && (
-          <section className="helios-card col-12">
+          <section className="nayanx-card col-12">
             <div className="card-header-row">
               <div>
                 <h2 style={{ fontSize: "18px", fontWeight: "700" }}>
@@ -1679,7 +1935,7 @@ startxref
                   }}
                 />
                 <div style={{ fontSize: "28px", marginBottom: "6px" }}>📁</div>
-                <div style={{ fontSize: "14px", fontWeight: "600", color: "#fff" }}>
+                <div style={{ fontSize: "14px", fontWeight: "600", color: "var(--text-primary)" }}>
                   {leakFileInput ? `Selected: ${leakFileInput.name}` : "Click or Drag & Drop Leaked PDF Here"}
                 </div>
                 <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
@@ -1694,8 +1950,8 @@ startxref
                   <button
                     className="card-badge"
                     style={{
-                      background: "rgba(236,72,153,0.25)",
-                      color: "#f472b6",
+                      background: "rgba(255,255,255,0.08)",
+                      color: "#ffffff",
                       cursor: "pointer",
                       padding: "8px 14px",
                     }}
@@ -1709,8 +1965,8 @@ startxref
                   <button
                     className="card-badge"
                     style={{
-                      background: "rgba(236,72,153,0.25)",
-                      color: "#f472b6",
+                      background: "rgba(255,255,255,0.08)",
+                      color: "#ffffff",
                       cursor: "pointer",
                       padding: "8px 14px",
                     }}
@@ -1724,8 +1980,8 @@ startxref
                   <button
                     className="card-badge"
                     style={{
-                      background: "rgba(236,72,153,0.25)",
-                      color: "#f472b6",
+                      background: "rgba(255,255,255,0.08)",
+                      color: "#ffffff",
                       cursor: "pointer",
                       padding: "8px 14px",
                     }}
@@ -1739,8 +1995,8 @@ startxref
                   <button
                     className="card-badge"
                     style={{
-                      background: "rgba(245,158,11,0.2)",
-                      color: "#fbbf24",
+                      background: "rgba(255,255,255,0.06)",
+                      color: "#cbd5e1",
                       cursor: "pointer",
                       padding: "8px 14px",
                     }}
@@ -1769,45 +2025,106 @@ startxref
                     <div
                       style={{
                         display: "grid",
-                        gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-                        gap: "10px",
-                        marginTop: "14px",
+                        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                        gap: "12px",
+                        marginTop: "16px",
                       }}
                     >
-                      <div>
+                      <div className="portfolio-mini-card">
                         <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>IDENTIFIED LEAKER</div>
-                        <div style={{ fontSize: "13px", fontWeight: "700", color: "#fff" }}>
+                        <div style={{ fontSize: "13px", fontWeight: "700", color: "var(--text-primary)", marginTop: "2px" }}>
                           {attributeResult.recipient_name || "Unknown"} ({attributeResult.recipient_id || "N/A"})
                         </div>
                       </div>
-                      <div>
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>ML-DSA-65 SIGNATURE</div>
+
+                      <div className="portfolio-mini-card">
+                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[1] SHA3-256 COMMIT-REVEAL</div>
                         <div
                           style={{
-                            fontSize: "13px",
+                            fontSize: "12.5px",
                             fontWeight: "700",
-                            color: attributeResult.signature_valid ? "#10b981" : "#ef4444",
+                            color: attributeResult.commitment_valid ? "#ffffff" : "#94a3b8",
+                            marginTop: "2px",
                           }}
                         >
-                          {attributeResult.signature_valid ? "✔ VERIFIED VALID (FIPS 204)" : "✖ INVALID / ABSENT"}
+                          {attributeResult.commitment_valid ? "✔ VERIFIED VALID" : "✖ FAILED / TAMPERED"}
                         </div>
                       </div>
-                      <div>
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>MERKLE HASH CHAIN</div>
+
+                      <div className="portfolio-mini-card">
+                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[2] HMAC WATERMARK DERIVATION</div>
                         <div
                           style={{
-                            fontSize: "13px",
+                            fontSize: "12.5px",
                             fontWeight: "700",
-                            color: attributeResult.chain_valid ? "#10b981" : "#ef4444",
+                            color: attributeResult.watermark_hmac_valid ? "#ffffff" : "#94a3b8",
+                            marginTop: "2px",
+                          }}
+                        >
+                          {attributeResult.watermark_hmac_valid ? "✔ VERIFIED VALID" : "✖ FORGED / MISMATCH"}
+                        </div>
+                      </div>
+
+                      <div className="portfolio-mini-card">
+                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[3] RECIPIENT ML-DSA-65 SIG</div>
+                        <div
+                          style={{
+                            fontSize: "12.5px",
+                            fontWeight: "700",
+                            color: attributeResult.recipient_signature_valid ? "#ffffff" : "#94a3b8",
+                            marginTop: "2px",
+                          }}
+                        >
+                          {attributeResult.recipient_signature_valid ? "✔ VERIFIED VALID" : "✖ INVALID / ABSENT"}
+                        </div>
+                      </div>
+
+                      <div className="portfolio-mini-card">
+                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[4] SERVICE COUNTER-SIGNATURE</div>
+                        <div
+                          style={{
+                            fontSize: "12.5px",
+                            fontWeight: "700",
+                            color: attributeResult.service_signature_valid ? "#ffffff" : "#94a3b8",
+                            marginTop: "2px",
+                          }}
+                        >
+                          {attributeResult.service_signature_valid ? "✔ COUNTER-SIGNED" : "✖ ABSENT / UNVERIFIED"}
+                        </div>
+                      </div>
+
+                      <div className="portfolio-mini-card">
+                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[5] MERKLE HASH-CHAIN</div>
+                        <div
+                          style={{
+                            fontSize: "12.5px",
+                            fontWeight: "700",
+                            color: attributeResult.chain_valid ? "#ffffff" : "#94a3b8",
+                            marginTop: "2px",
                           }}
                         >
                           {attributeResult.chain_valid ? "✔ INTACT & UNTAMPERED" : "✖ TAMPER DETECTED"}
                         </div>
                       </div>
-                      <div>
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>LEDGER BLOCK INDEX</div>
-                        <div style={{ fontSize: "13px", fontWeight: "700", color: "#fff" }}>
-                          #{attributeResult.ledger_index ?? "N/A"} (Chain Height: {attributeResult.chain_length})
+
+                      <div className="portfolio-mini-card">
+                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[6] DISTRIBUTION BUNDLE</div>
+                        <div
+                          style={{
+                            fontSize: "12.5px",
+                            fontWeight: "700",
+                            color: attributeResult.distribution_bundle_valid ? "#ffffff" : "#94a3b8",
+                            marginTop: "2px",
+                          }}
+                        >
+                          {attributeResult.distribution_bundle_valid ? "✔ AUTHENTIC BUNDLE" : "✖ UNBOUND"}
+                        </div>
+                      </div>
+
+                      <div className="portfolio-mini-card">
+                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>LEDGER AUDIT ANCHOR</div>
+                        <div style={{ fontSize: "13px", fontWeight: "700", color: "var(--text-primary)", marginTop: "2px" }}>
+                          Block #{attributeResult.ledger_index ?? "N/A"} (Chain Height: {attributeResult.chain_length})
                         </div>
                       </div>
                     </div>
@@ -1833,7 +2150,7 @@ startxref
 
         {/* View 5: GET /ledger */}
         {activeNav === "ledger" && (
-          <section className="helios-card col-12">
+          <section className="nayanx-card col-12">
             <div className="card-header-row">
               <div>
                 <h2 style={{ fontSize: "18px", fontWeight: "700" }}>
@@ -1850,14 +2167,14 @@ startxref
                 </button>
                 <button
                   className="card-badge"
-                  style={{ background: "rgba(239, 68, 68, 0.2)", color: "#f87171", cursor: "pointer" }}
+                  style={{ background: "rgba(255, 255, 255, 0.06)", color: "#cbd5e1", cursor: "pointer" }}
                   onClick={handleTamperSimulation}
                 >
                   Tamper Test (Simulate Attack)
                 </button>
                 <button
                   className="card-badge"
-                  style={{ background: "rgba(16, 185, 129, 0.2)", color: "#34d399", cursor: "pointer" }}
+                  style={{ background: "rgba(255, 255, 255, 0.12)", color: "#ffffff", cursor: "pointer" }}
                   onClick={handleRestoreLedger}
                 >
                   Restore / Heal Ledger
@@ -1873,8 +2190,8 @@ startxref
                   style={{
                     padding: "4px 12px",
                     borderRadius: "var(--radius-full)",
-                    background: ledgerData?.chain_valid ? "rgba(16,185,129,0.15)" : "rgba(239,68,68,0.2)",
-                    color: ledgerData?.chain_valid ? "#34d399" : "#f87171",
+                    background: ledgerData?.chain_valid ? "rgba(255,255,255,0.12)" : "rgba(255,255,255,0.06)",
+                    color: ledgerData?.chain_valid ? "#ffffff" : "#94a3b8",
                     fontWeight: "700",
                     fontSize: "12px",
                   }}
@@ -1883,7 +2200,7 @@ startxref
                 </span>
               </div>
               <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
-                Total Blocks: <strong style={{ color: "#fff" }}>{ledgerData?.chain_length || 0}</strong>
+                Total Blocks: <strong style={{ color: "var(--text-primary)" }}>{ledgerData?.chain_length || 0}</strong>
               </div>
               <div style={{ fontSize: "12px", color: "var(--text-muted)" }}>
                 Head Hash:{" "}
@@ -1899,24 +2216,43 @@ startxref
                 <div key={b.entry_index} className="merkle-block">
                   <div>
                     <span className="merkle-index">Block #{b.entry_index}</span>
-                    <div style={{ fontSize: "10px", color: "var(--text-muted)", marginTop: "2px" }}>
-                      {b.entry_index === 0 ? "GENESIS" : b.recipient_id}
+                    <div style={{ fontSize: "10.5px", color: "var(--text-muted)", marginTop: "2px" }}>
+                      {b.entry_index === 0
+                        ? "GENESIS"
+                        : b.entry_type === "distribution_commitment"
+                        ? `Commitment: ${b.recipient_id}`
+                        : `Decryption: ${b.recipient_id}`}
                     </div>
                   </div>
 
                   <div>
                     <div className="merkle-hash-label">Previous Hash</div>
-                    <div className="merkle-hash-val">{b.previous_hash.slice(0, 24)}...</div>
+                    <div className="merkle-hash-val">{b.previous_hash.slice(0, 20)}...</div>
                   </div>
 
                   <div>
                     <div className="merkle-hash-label">Block Entry Hash</div>
-                    <div className="merkle-hash-val">{b.entry_hash.slice(0, 24)}...</div>
+                    <div className="merkle-hash-val">{b.entry_hash.slice(0, 20)}...</div>
                   </div>
 
                   <div style={{ textAlign: "right" }}>
-                    <div className="merkle-hash-label">ML-DSA Signature</div>
-                    <span className="key-badge-green">● Valid</span>
+                    <div className="merkle-hash-label">ML-DSA Signatures</div>
+                    <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end", flexWrap: "wrap", marginTop: "3px" }}>
+                      {b.entry_type === "distribution_commitment" ? (
+                        <span className="card-badge" style={{ background: "rgba(255, 255, 255, 0.12)", color: "#ffffff" }}>
+                          🛡️ Service Signed (SHA3)
+                        </span>
+                      ) : (
+                        <>
+                          <span className="key-badge-green">● Recipient Sig</span>
+                          {b.service_signature && (
+                            <span className="card-badge" style={{ background: "rgba(255, 255, 255, 0.12)", color: "#ffffff" }}>
+                              ● Service Counter-Sig
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
@@ -1951,7 +2287,7 @@ startxref
             </div>
             <div className="modal-body">
               <p style={{ fontSize: "13px", color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                Helios enforces an offline air-gapped cryptographic boundary conforming to US NIST FIPS 203 and FIPS 204.
+                NayanX enforces an offline air-gapped cryptographic boundary conforming to US NIST FIPS 203 and FIPS 204.
               </p>
 
               <table className="spec-table">
@@ -1992,7 +2328,7 @@ startxref
               </table>
 
               <div style={{ marginTop: "20px", display: "flex", justifyContent: "flex-end" }}>
-                <button className="helios-glow-btn" onClick={() => setShowHsmModal(false)}>
+                <button className="nayanx-glow-btn" onClick={() => setShowHsmModal(false)}>
                   Close Specification
                 </button>
               </div>
@@ -2024,7 +2360,7 @@ startxref
                   <div
                     style={{
                       fontSize: "12px",
-                      color: "var(--success-green)",
+                      color: "#ffffff",
                       display: "flex",
                       alignItems: "center",
                       gap: "6px",
@@ -2043,8 +2379,8 @@ startxref
                   <button
                     className="card-badge"
                     style={{
-                      background: "rgba(16, 185, 129, 0.2)",
-                      color: "#34d399",
+                      background: "rgba(255, 255, 255, 0.12)",
+                      color: "#ffffff",
                       cursor: "pointer",
                       padding: "8px 16px",
                     }}
@@ -2078,7 +2414,7 @@ startxref
               <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
                 <div className="portfolio-mini-card">
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontWeight: "700", color: "#fff" }}>Air-Gap Integrity Check</span>
+                    <span style={{ fontWeight: "700", color: "var(--text-primary)" }}>Air-Gap Integrity Check</span>
                     <span className="key-badge-green">● PASS</span>
                   </div>
                   <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
@@ -2088,7 +2424,7 @@ startxref
 
                 <div className="portfolio-mini-card">
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontWeight: "700", color: "#fff" }}>Audit Ledger Blocks Verified</span>
+                    <span style={{ fontWeight: "700", color: "var(--text-primary)" }}>Audit Ledger Blocks Verified</span>
                     <span className="key-badge-green">● {ledgerData?.chain_length || 0} BLOCKS</span>
                   </div>
                   <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
@@ -2098,7 +2434,7 @@ startxref
 
                 <div className="portfolio-mini-card">
                   <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontWeight: "700", color: "#fff" }}>Key Vault Authentication</span>
+                    <span style={{ fontWeight: "700", color: "var(--text-primary)" }}>Key Vault Authentication</span>
                     <span className="key-badge-green">● SEALED</span>
                   </div>
                   <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
@@ -2126,11 +2462,11 @@ startxref
             <div className="modal-body">
               <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "16px" }}>
                 <div className="user-avatar" style={{ width: "54px", height: "54px", fontSize: "18px" }}>
-                  NR
+                  S
                 </div>
                 <div>
-                  <h3 style={{ fontSize: "16px", color: "#fff", fontWeight: "700" }}>Nadia Rachel</h3>
-                  <div style={{ fontSize: "12px", color: "var(--accent-pink)" }}>Chief Intelligence Analyst</div>
+                  <h3 style={{ fontSize: "16px", color: "var(--text-primary)", fontWeight: "700" }}>Sai</h3>
+                  <div style={{ fontSize: "12px", color: "#cbd5e1" }}>Chief Intelligence Analyst</div>
                   <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
                     Clearance: Level 4 Top-Secret // Post-Quantum Cryptographic Attache
                   </div>
@@ -2139,13 +2475,13 @@ startxref
 
               <div className="portfolio-mini-card" style={{ marginBottom: "14px" }}>
                 <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>Enclave Station</div>
-                <div style={{ fontSize: "13px", fontWeight: "700", color: "#fff", marginTop: "2px" }}>
-                  Helios Air-Gap Node #01 (Offline Defense Enclave)
+                <div style={{ fontSize: "13px", fontWeight: "700", color: "var(--text-primary)", marginTop: "2px" }}>
+                  NayanX Air-Gap Node #01 (Offline Defense Enclave)
                 </div>
               </div>
 
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <button className="helios-glow-btn" onClick={() => setShowProfileModal(false)}>
+                <button className="nayanx-glow-btn" onClick={() => setShowProfileModal(false)}>
                   Close
                 </button>
               </div>

@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data directories and keys (Air-gapped security requirement)
+data/
+crypto-service/data/
+*.db
+*.db-journal
+*.bin
+
+# Environments and Secrets
+.env
+.env.*
+venv/
+.venv/
+env/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Web
+web/node_modules/
+web/.next/
+web/out/
+
+# OS artifacts
+.DS_Store
+Thumbs.db

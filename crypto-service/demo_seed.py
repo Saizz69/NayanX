@@ -34,7 +34,11 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
+# Ensure DEMO_MODE is active for standalone demo execution
+os.environ.setdefault("DEMO_MODE", "true")
+
 import requests
+
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
@@ -221,22 +225,49 @@ def run_demo(use_http: bool = True):
     print(f"  Timestamp of Decryption:  {attr_res['timestamp']}")
     print(f"  Extracted Watermark Hash: {attr_res['watermark_hash']}")
     print(f"  Document Content Hash:    {attr_res['document_hash']}")
-    print(f"  Post-Quantum ML-DSA-65:   {'VERIFIED VALID (FIPS 204)' if attr_res['signature_valid'] else 'INVALID'}")
-    print(f"  Merkle Hash-Chain Audit:  {'INTACT & UNTAMPERED' if attr_res['chain_valid'] else 'TAMPER DETECTED'}")
+    print(f"  [1] SHA3-256 Commitment: {'VERIFIED' if attr_res.get('commitment_valid') else 'FAILED'}")
+    print(f"  [2] HMAC Watermark:       {'VERIFIED' if attr_res.get('watermark_hmac_valid') else 'FAILED'}")
+    print(f"  [3] Recipient ML-DSA-65:  {'VERIFIED' if attr_res.get('recipient_signature_valid') else 'FAILED'}")
+    print(f"  [4] Service Counter-Sig:  {'VERIFIED' if attr_res.get('service_signature_valid') else 'FAILED'}")
+    print(f"  [5] Ledger Hash-Chain:    {'VERIFIED' if attr_res.get('chain_valid') else 'FAILED'}")
+    print(f"  [6] Distribution Bundle:  {'VERIFIED' if attr_res.get('distribution_bundle_valid') else 'FAILED'}")
     print(f"  Audit Ledger Block Index: #{attr_res['ledger_index']} (Chain Length: {attr_res['chain_length']})")
     print(f"\n  Summary: {attr_res['summary']}")
     print("=" * 80)
 
-    # Step 7: Ledger Audit
-    print("\n[STEP 7] Inspecting Tamper-Evident Ledger...")
+    # Step 7: Negative Test - Tampered Commitment
+    print("\n[STEP 7] NEGATIVE TEST: Simulating Tampered SHA3-256 Pre-Distribution Commitment...")
+    tamper_res = call_post_json(f"/demo/tamper-commitment?recipient_id={leaker_id}&document_hash={doc_hash}", {})
+    print(f"  * Injected forged commitment: {tamper_res.get('forged_commitment', '0000...')}")
+    attr_tampered = call_post_form("/leak/attribute", {"pdf_base64": b64_encode(leaked_copy["bytes"])})
+    print(f"  * Tampered Verification Result -> Attributed: {attr_tampered['attributed']}, Commitment Valid: {attr_tampered['commitment_valid']}")
+    assert attr_tampered["commitment_valid"] is False, "Tampered commitment MUST fail verification!"
+    print("  [SUCCESS] Broken commitment was immediately detected and attribution rejected!")
+
+    # Step 8: Negative Test - Forged Watermark HMAC
+    print("\n[STEP 8] NEGATIVE TEST: Simulating Document with Forged Watermark...")
+    from app.core.watermark import embed_watermark_in_pdf
+    forged_bytes = embed_watermark_in_pdf(leaked_copy["bytes"], {
+        "recipient_id": leaker_id,
+        "document_hash": "0" * 64,
+        "watermark_hash": "bad0" * 16,
+        "timestamp": "2026-09-27T00:00:00Z",
+    })
+    attr_forged = call_post_form("/leak/attribute", {"pdf_base64": b64_encode(forged_bytes)})
+    print(f"  * Forged Watermark Result -> Attributed: {attr_forged['attributed']}, HMAC Valid: {attr_forged['watermark_hmac_valid']}")
+    assert attr_forged["watermark_hmac_valid"] is False, "Forged watermark MUST fail verification!"
+    print("  [SUCCESS] Forged watermark HMAC was immediately detected and attribution rejected!")
+
+    # Step 9: Ledger Audit
+    print("\n[STEP 9] Inspecting Tamper-Evident Ledger...")
     ledger_audit = call_get("/ledger")
     print(f"  * Total Blocks in Ledger: {ledger_audit['chain_length']}")
     print(f"  * Entire Chain Integrity: {'100% VALID' if ledger_audit['chain_valid'] else 'COMPROMISED'}")
     print(f"  * Latest Head Hash:       {ledger_audit['head_hash']}")
 
-    print("\n[COMPLETE] Seed & Demo workflow completed successfully!")
+    print("\n[COMPLETE] Seed & Demo workflow (positive and negative) completed successfully!")
     print(f"Watermarked artifacts saved in: {OUTPUT_DIR.resolve()}\n")
 
 
 if __name__ == "__main__":
-    run_demo(use_http=True)
+    run_demo(use_http=False)

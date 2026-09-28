@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Helios Forensic — Post-Quantum Document Attribution System",
+  title: "NayanX Forensic — Post-Quantum Document Attribution System",
   description: "Air-gapped post-quantum document provenance and leak attribution protocol powered by ML-KEM-768, ML-DSA-65, AES-256-GCM, and hash-chained Merkle ledger.",
 };
 
@@ -12,7 +12,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
@@ -21,7 +21,7 @@ export default function RootLayout({
           rel="stylesheet"
         />
       </head>
-      <body>{children}</body>
+      <body suppressHydrationWarning>{children}</body>
     </html>
   );
 }

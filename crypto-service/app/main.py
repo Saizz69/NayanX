@@ -22,17 +22,27 @@ logger = logging.getLogger("crypto_service")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup diagnostics
+    # Startup diagnostics and cryptographic self-test
     logger.info("Initializing Post-Quantum Forensic Attribution Service...")
+    logger.info("Running PQC Startup Self-Test (ML-KEM round-trip, ML-DSA sign/verify, tampered-signature rejection)...")
+    try:
+        self_test_res = PQCEngine.run_self_test()
+        app.state.self_test = self_test_res
+        logger.info("PQC Startup Self-Test PASSED: %s", self_test_res)
+    except Exception as e:
+        logger.critical("FATAL: PQC Startup Self-Test FAILED: %s", e)
+        raise RuntimeError(f"Service startup aborted due to cryptographic self-test failure: {e}") from e
+
     status = PQCEngine.get_engine_status()
-    logger.info("PQC Status: Engine=%s, KEM=%s, DSA=%s", status["engine"], status["fips_203_kem"], status["fips_204_dsa"])
+    logger.info("PQC Status: Engine=%s (%s), KEM=%s, DSA=%s", status["engine"], status["engine_note"], status["fips_203_kem"], status["fips_204_dsa"])
     logger.info("Data Directory: %s", config.DATA_DIR)
     yield
     logger.info("Shutting down crypto service.")
 
 
+
 app = FastAPI(
-    title="Helios Post-Quantum Forensic Attribution Engine",
+    title="NayanX Post-Quantum Forensic Attribution Engine",
     description="""
     Offline, Air-Gapped Forensic Document-Attribution System for Hackathon.
     
@@ -64,7 +74,7 @@ app.include_router(router, prefix="/api")
 @app.get("/", tags=["Root"])
 def root():
     return {
-        "service": "Helios Post-Quantum Forensic Attribution Engine",
+        "service": "NayanX Post-Quantum Forensic Attribution Engine",
         "version": "1.0.0",
         "status": "operational",
         "pqc_standards": {
