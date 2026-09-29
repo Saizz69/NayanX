@@ -922,25 +922,73 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
     chain_audit = ledger.verify_chain_integrity()
     chain_valid = chain_audit["valid"]
 
-    # Check if leaked PDF matches any registered Tardos structured document
-    all_tardos_docs = keystore.get_all_tardos_documents()
+    extracted_wm_hash = extract_watermark_hash_from_pdf(leaked_pdf_bytes)
+    conv_tag = extract_watermark_from_pdf(leaked_pdf_bytes)
+    claimed_rec_id = conv_tag.get("recipient_id") if conv_tag else None
+
     matched_tardos = None
     best_extraction = None
     best_match_score = -1.0
 
-    for doc_id, doc_rec in all_tardos_docs.items():
+    all_tardos_docs = keystore.get_all_tardos_documents()
+    candidate_doc_ids = []
+
+    # Fast-path 1: Direct document identification via convenience tag
+    if conv_tag:
+        target_id = conv_tag.get("document_id") or conv_tag.get("document_hash")
+        if target_id and target_id in all_tardos_docs:
+            candidate_doc_ids.append(target_id)
+
+    # Fast-path 2: Title matching from PDF text if not explicitly tagged
+    if not candidate_doc_ids and all_tardos_docs:
+        try:
+            reader = PdfReader(io.BytesIO(leaked_pdf_bytes))
+            first_page_text = reader.pages[0].extract_text() if reader.pages else ""
+        except Exception:
+            first_page_text = ""
+
+        if first_page_text:
+            for doc_id, doc_rec in all_tardos_docs.items():
+                title = doc_rec.get("title", "")
+                if title and title.lower() in first_page_text.lower():
+                    candidate_doc_ids.append(doc_id)
+
+    # Fast-path 3: Skip slot scanning if this is a known pure legacy document
+    is_pure_legacy = bool(
+        conv_tag
+        and conv_tag.get("role") != "secondary_convenience_tag"
+        and extracted_wm_hash
+        and ledger.find_by_watermark_hash(extracted_wm_hash)
+    )
+
+    if not candidate_doc_ids and not is_pure_legacy:
+        candidate_doc_ids = list(all_tardos_docs.keys())
+
+    for doc_id in candidate_doc_ids:
+        doc_rec = all_tardos_docs.get(doc_id)
+        if not doc_rec:
+            continue
         try:
             source = doc_rec["structured_source"]
             delta_pt = doc_rec.get("delta_pt", 0.35)
             s_doc = StructuredDocument(source, delta_pt=delta_pt)
             ref_bytes = b64_decode(doc_rec["ref_pdf_b64"])
             ext = extract_document_slots(leaked_pdf_bytes, s_doc, ref_bytes)
-            if ext["total_valid"] == 0:
+            total_valid = ext.get("total_valid", 0)
+            total_slots = ext.get("total_slots", 0)
+
+            # Document must have at least 3 valid slots AND at least 40% of slots valid
+            min_slots_needed = max(3, int(total_slots * 0.40))
+            if total_valid < min_slots_needed:
                 continue
 
             w_frac = (ext["wording_valid"] / ext["wording_slots_count"]) if ext.get("wording_slots_count", 0) > 0 else 1.0
-            t_frac = (ext["total_valid"] / ext["total_slots"]) if ext.get("total_slots", 0) > 0 else 0.0
-            score = (w_frac * 2.0 + t_frac) * ext["total_valid"]
+            t_frac = (total_valid / total_slots) if total_slots > 0 else 0.0
+            score = (w_frac * 2.0 + t_frac) * total_valid
+
+            if claimed_rec_id and claimed_rec_id in doc_rec.get("recipients", {}):
+                score += 10.0
+
             if score > best_match_score:
                 best_match_score = score
                 matched_tardos = (doc_id, doc_rec, s_doc, ref_bytes)
@@ -985,7 +1033,6 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
         thresh_attr = calib["threshold_attributed"]
         thresh_susp = calib["threshold_suspected"]
 
-
         # Check commitments in ledger
         p_entry = ledger.find_p_commitment_entry(doc_id)
         p_commitment_valid = False
@@ -1007,7 +1054,7 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
             convenience_match = (claimed_id == top_cand_id)
 
         # Verdict assignment: ATTRIBUTED / SUSPECTED / INCONCLUSIVE
-        # For ATTRIBUTED, score >= threshold_attributed AND ledger checks (H_p, C_r, chain) must pass
+        tamper_detected = False
         if (
             top_cand_id
             and top_score >= thresh_attr
@@ -1020,129 +1067,179 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
         elif top_cand_id and top_score >= thresh_susp:
             verdict = "SUSPECTED"
             attributed = False
+        elif (not p_commitment_valid) or (not codeword_commitment_valid) or (not chain_valid):
+            verdict = "TAMPERED"
+            attributed = False
+            tamper_detected = True
         else:
             verdict = "INCONCLUSIVE"
             attributed = False
 
-        top_cand_name = top_cand_id
-        if top_cand_id:
-            top_rec_info = keystore.get_recipient_public(top_cand_id)
-            if top_rec_info:
-                top_cand_name = top_rec_info.get("name", top_cand_id)
+        # If Tardos analysis is INCONCLUSIVE, or candidate score is non-positive,
+        # but this document has an authoritative watermark in the ledger or extracted watermark hash or convenience tag,
+        # fall through to ledger watermark verification so authentic/tampered receipts are verified accurately!
+        if (verdict == "INCONCLUSIVE" or top_score <= 0.0) and (has_ledger_wm or extracted_wm_hash or conv_tag):
+            pass
+        else:
+            top_cand_name = top_cand_id
+            if top_cand_id:
+                top_rec_info = keystore.get_recipient_public(top_cand_id)
+                if top_rec_info:
+                    top_cand_name = top_rec_info.get("name", top_cand_id)
 
-        doc_hash = compute_sha256(ref_bytes)
-        summary = (
-            f"Verdict: {verdict}. "
-            f"Candidate: '{top_cand_name}' (ID: {top_cand_id}). "
-            f"Accusation score: {top_score:.4f} (Thresholds: ATTRIBUTED >= {thresh_attr} at alpha=0.001, "
-            f"SUSPECTED >= {thresh_susp} at alpha=0.01 calibrated via 20,000 Monte Carlo trials). "
-            f"Observed slots: {best_extraction['total_valid']}/{best_extraction['total_slots']} valid "
-            f"({best_extraction['total_erased']} erasures, erasure rate {best_extraction['erasure_rate']:.2%}). "
-            f"Ledger commitments: H_p {'VALID' if p_commitment_valid else 'INVALID'}, "
-            f"C_r {'VALID' if codeword_commitment_valid else 'INVALID'}, "
-            f"Chain {'VALID' if chain_valid else 'INVALID'}."
-        )
+            doc_hash = compute_sha256(ref_bytes)
+            if verdict == "TAMPERED":
+                summary = (
+                    f"🚨 TAMPERED DOCUMENT DETECTED: Tardos candidate '{top_cand_name}' (ID: {top_cand_id}) "
+                    f"failed pre-distribution ledger commitment or chain validation. "
+                    f"H_p: {'VALID' if p_commitment_valid else 'COMPROMISED'}, "
+                    f"C_r: {'VALID' if codeword_commitment_valid else 'COMPROMISED'}, "
+                    f"Chain: {'VALID' if chain_valid else 'COMPROMISED'}."
+                )
+            else:
+                summary = (
+                    f"Verdict: {verdict}. "
+                    f"Candidate: '{top_cand_name}' (ID: {top_cand_id}). "
+                    f"Accusation score: {top_score:.4f} (Thresholds: ATTRIBUTED >= {thresh_attr} at alpha=0.001, "
+                    f"SUSPECTED >= {thresh_susp} at alpha=0.01 calibrated via 20,000 Monte Carlo trials). "
+                    f"Observed slots: {best_extraction['total_valid']}/{best_extraction['total_slots']} valid "
+                    f"({best_extraction['total_erased']} erasures, erasure rate {best_extraction['erasure_rate']:.2%}). "
+                    f"Ledger commitments: H_p {'VALID' if p_commitment_valid else 'INVALID'}, "
+                    f"C_r {'VALID' if codeword_commitment_valid else 'INVALID'}, "
+                    f"Chain {'VALID' if chain_valid else 'INVALID'}."
+                )
 
-        # Complete Phase 4 Evidence Bundle & Section 65B(4) Certificate
-        inclusion_proofs = {}
-        if p_entry:
+            # Complete Phase 4 Evidence Bundle & Section 65B(4) Certificate
+            inclusion_proofs = {}
+            if p_entry:
+                try:
+                    inclusion_proofs["p_commitment"] = ledger.get_merkle_proof(p_entry["entry_index"])
+                except Exception:
+                    pass
+            if cr_entry:
+                try:
+                    inclusion_proofs["codeword_commitment"] = ledger.get_merkle_proof(cr_entry["entry_index"])
+                except Exception:
+                    pass
+
             try:
-                inclusion_proofs["p_commitment"] = ledger.get_merkle_proof(p_entry["entry_index"])
+                checkpoint_ref = ledger.export_signed_checkpoint()
             except Exception:
-                pass
-        if cr_entry:
-            try:
-                inclusion_proofs["codeword_commitment"] = ledger.get_merkle_proof(cr_entry["entry_index"])
-            except Exception:
-                pass
+                checkpoint_ref = None
 
-        try:
-            checkpoint_ref = ledger.export_signed_checkpoint()
-        except Exception:
-            checkpoint_ref = None
+            all_blks = ledger.get_all_blocks()
+            recent_blocks = all_blks[-3:] if all_blks else []
 
-        all_blks = ledger.get_all_blocks()
-        recent_blocks = all_blks[-3:] if all_blks else []
+            cryptographic_booleans = {
+                "p_commitment_valid": p_commitment_valid,
+                "codeword_commitment_valid": codeword_commitment_valid,
+                "chain_valid": chain_valid,
+                "convenience_tag_match": convenience_match,
+                "threshold_attributed_met": bool(top_score >= thresh_attr if top_cand_id else False),
+                "threshold_suspected_met": bool(top_score >= thresh_susp if top_cand_id else False),
+            }
 
-        cryptographic_booleans = {
-            "p_commitment_valid": p_commitment_valid,
-            "codeword_commitment_valid": codeword_commitment_valid,
-            "chain_valid": chain_valid,
-            "convenience_tag_match": convenience_match,
-            "threshold_attributed_met": bool(top_score >= thresh_attr if top_cand_id else False),
-            "threshold_suspected_met": bool(top_score >= thresh_susp if top_cand_id else False),
-        }
+            legal_notice = (
+                "LEGAL NON-DETERMINATION NOTICE: This evidence establishes mathematical document provenance "
+                "and cryptographic key binding under empirically calibrated false-accusation probability bounds. "
+                "Attribution identifies the cryptographic recipient identity whose key material or authorized session "
+                "generated the distinct variant pattern; it does NOT constitute a judicial determination as to the physical "
+                "identity of the person who leaked, photographed, or disseminated the document."
+            )
 
-        legal_notice = (
-            "LEGAL NON-DETERMINATION NOTICE: This evidence establishes mathematical document provenance "
-            "and cryptographic key binding under empirically calibrated false-accusation probability bounds. "
-            "Attribution identifies the cryptographic recipient identity whose key material or authorized session "
-            "generated the distinct variant pattern; it does NOT constitute a judicial determination as to the physical "
-            "identity of the person who leaked, photographed, or disseminated the document."
-        )
+            evidence_bundle = {
+                "observed_vector": observed_vector,
+                "recipient_scores": candidate_scores,
+                "calibration_table": calib,
+                "inclusion_proofs": inclusion_proofs,
+                "block_headers": recent_blocks,
+                "signatures": checkpoint_ref.get("signatures", {}) if checkpoint_ref else {},
+                "checkpoint_reference": checkpoint_ref,
+                "cryptographic_booleans": cryptographic_booleans,
+                "legal_notice": legal_notice,
+            }
 
-        evidence_bundle = {
-            "observed_vector": observed_vector,
-            "recipient_scores": candidate_scores,
-            "calibration_table": calib,
-            "inclusion_proofs": inclusion_proofs,
-            "block_headers": recent_blocks,
-            "signatures": checkpoint_ref.get("signatures", {}) if checkpoint_ref else {},
-            "checkpoint_reference": checkpoint_ref,
-            "cryptographic_booleans": cryptographic_booleans,
-            "legal_notice": legal_notice,
-        }
+            cert_evidence_data = {
+                "verdict": verdict,
+                "recipient_id": top_cand_id if verdict in ("ATTRIBUTED", "SUSPECTED", "TAMPERED") else None,
+                "document_id": doc_id,
+                "document_hash": doc_hash,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "score": round(top_score, 4) if top_cand_id else None,
+                "thresholds": calib,
+                "evidence_bundle": evidence_bundle,
+            }
+            cert_pdf_bytes = generate_section_65b_certificate(cert_evidence_data)
+            cert_pdf_b64 = b64_encode(cert_pdf_bytes)
+            cert_filename = f"Section_65B_Certificate_{doc_id}_{top_cand_id or 'evidence'}.pdf"
 
-        cert_evidence_data = {
-            "verdict": verdict,
-            "recipient_id": top_cand_id if verdict in ("ATTRIBUTED", "SUSPECTED") else None,
-            "document_id": doc_id,
-            "document_hash": doc_hash,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "score": round(top_score, 4) if top_cand_id else None,
-            "thresholds": calib,
-            "evidence_bundle": evidence_bundle,
-        }
-        cert_pdf_bytes = generate_section_65b_certificate(cert_evidence_data)
-        cert_pdf_b64 = b64_encode(cert_pdf_bytes)
-        cert_filename = f"Section_65B_Certificate_{doc_id}_{top_cand_id or 'evidence'}.pdf"
+            return LeakAttributeResponse(
+                verdict=verdict,
+                attributed=attributed,
+                tamper_detected=tamper_detected,
+                tamper_type="COMMITMENT_OR_CHAIN_TAMPERED" if tamper_detected else None,
+                recipient_id=top_cand_id if verdict in ("ATTRIBUTED", "SUSPECTED", "TAMPERED") else None,
+                recipient_name=top_cand_name if verdict in ("ATTRIBUTED", "SUSPECTED", "TAMPERED") else None,
+                document_id=doc_id,
+                document_hash=doc_hash,
+                watermark_hash=conv_payload.get("watermark_hash") if conv_payload else None,
+                score=round(top_score, 4) if top_cand_id else None,
+                candidate_scores=candidate_scores,
+                thresholds=calib,
+                observed_slots=best_extraction,
+                p_commitment_valid=p_commitment_valid,
+                codeword_commitment_valid=codeword_commitment_valid,
+                convenience_tag_detected=convenience_detected,
+                convenience_tag_match=convenience_match,
+                commitment_valid=codeword_commitment_valid,
+                watermark_hmac_valid=convenience_match,
+                recipient_signature_valid=chain_valid,
+                service_signature_valid=chain_valid,
+                chain_valid=chain_valid,
+                distribution_bundle_valid=True,
+                signature_valid=chain_valid,
+                chain_length=chain_audit["chain_length"],
+                summary=summary,
+                evidence_bundle=evidence_bundle,
+                certificate_pdf_base64=cert_pdf_b64,
+                certificate_filename=cert_filename,
+            )
 
-        return LeakAttributeResponse(
-            verdict=verdict,
-            attributed=attributed,
-            recipient_id=top_cand_id if verdict in ("ATTRIBUTED", "SUSPECTED") else None,
-            recipient_name=top_cand_name if verdict in ("ATTRIBUTED", "SUSPECTED") else None,
-            document_id=doc_id,
-            document_hash=doc_hash,
-            watermark_hash=conv_payload.get("watermark_hash") if conv_payload else None,
-            score=round(top_score, 4) if top_cand_id else None,
-            candidate_scores=candidate_scores,
-            thresholds=calib,
-            observed_slots=best_extraction,
-            p_commitment_valid=p_commitment_valid,
-            codeword_commitment_valid=codeword_commitment_valid,
-            convenience_tag_detected=convenience_detected,
-            convenience_tag_match=convenience_match,
-            commitment_valid=codeword_commitment_valid,
-            watermark_hmac_valid=convenience_match,
-            recipient_signature_valid=chain_valid,
-            service_signature_valid=chain_valid,
-            chain_valid=chain_valid,
-            distribution_bundle_valid=True,
-            signature_valid=chain_valid,
-            chain_length=chain_audit["chain_length"],
-            summary=summary,
-            evidence_bundle=evidence_bundle,
-            certificate_pdf_base64=cert_pdf_b64,
-            certificate_filename=cert_filename,
-        )
-
-    # Fallback legacy extraction
-    extracted_wm_hash = extract_watermark_hash_from_pdf(leaked_pdf_bytes)
+    # Fallback / Authoritative cryptographic ledger watermark extraction
     if not extracted_wm_hash:
+        conv_payload = extract_watermark_from_pdf(leaked_pdf_bytes)
+        claimed_id = conv_payload.get("recipient_id") if conv_payload else None
+        if not claimed_id:
+            import re
+            m = re.search(rb'NayanX-PQC-ForensicEngine[^(]*\((rec-[a-f0-9]+)\)', leaked_pdf_bytes)
+            if m:
+                claimed_id = m.group(1).decode("ascii")
+
+        if claimed_id:
+            r_pub = keystore.get_recipient_public(claimed_id)
+            r_name = r_pub["name"] if r_pub else claimed_id
+            return LeakAttributeResponse(
+                verdict="INCONCLUSIVE",
+                attributed=False,
+                tamper_detected=True,
+                tamper_type="WATERMARK_STRIPPED_OR_CORRUPTED",
+                recipient_id=claimed_id,
+                recipient_name=r_name,
+                commitment_valid=False,
+                watermark_hmac_valid=False,
+                recipient_signature_valid=False,
+                service_signature_valid=False,
+                chain_valid=chain_valid,
+                distribution_bundle_valid=False,
+                signature_valid=False,
+                chain_length=chain_audit["chain_length"],
+                summary=f"🚨 TAMPERED DOCUMENT DETECTED: Forensic metadata traces provenance to recipient '{r_name}' ({claimed_id}), but the cryptographic watermark payload has been stripped or maliciously damaged.",
+            )
+
         return LeakAttributeResponse(
             verdict="INCONCLUSIVE",
             attributed=False,
+            tamper_detected=False,
             commitment_valid=False,
             watermark_hmac_valid=False,
             recipient_signature_valid=False,
@@ -1151,14 +1248,28 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
             distribution_bundle_valid=False,
             signature_valid=False,
             chain_length=chain_audit["chain_length"],
-            summary="No forensic watermark payload or Tardos slot variation found in document bytes.",
+            summary="No forensic watermark payload or Tardos slot variation found in document bytes. Authentic unwatermarked original or clean copy.",
         )
 
     entry = ledger.find_by_watermark_hash(extracted_wm_hash)
     if not entry:
+        conv_payload = extract_watermark_from_pdf(leaked_pdf_bytes)
+        claimed_id = conv_payload.get("recipient_id") if conv_payload else None
+        if not claimed_id:
+            import re
+            m = re.search(rb'NayanX-PQC-ForensicEngine[^(]*\((rec-[a-f0-9]+)\)', leaked_pdf_bytes)
+            if m:
+                claimed_id = m.group(1).decode("ascii")
+        r_pub = keystore.get_recipient_public(claimed_id) if claimed_id else None
+        r_name = r_pub["name"] if r_pub else (claimed_id or "Unknown")
+
         return LeakAttributeResponse(
             verdict="INCONCLUSIVE",
             attributed=False,
+            tamper_detected=True,
+            tamper_type="UNREGISTERED_OR_FORGED_WATERMARK",
+            recipient_id=claimed_id,
+            recipient_name=r_name if claimed_id else None,
             watermark_hash=extracted_wm_hash,
             commitment_valid=False,
             watermark_hmac_valid=False,
@@ -1168,7 +1279,7 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
             distribution_bundle_valid=False,
             signature_valid=False,
             chain_length=chain_audit["chain_length"],
-            summary=f"Watermark hash '{extracted_wm_hash[:16]}...' found in document bytes, but no matching entry exists in ledger.",
+            summary=f"🚨 TAMPERED / FORGED WATERMARK DETECTED: Watermark hash '{extracted_wm_hash[:16]}...' found in document bytes has no corresponding decryption receipt in the immutable ledger. " + (f"Framed / claimed recipient '{r_name}' ({claimed_id}) lacks cryptographic ledger proof — verdict is INCONCLUSIVE to prevent false framing." if claimed_id else "Origin unverified."),
         )
 
     rec_id = entry["record"].get("recipient_id", "")
@@ -1208,23 +1319,35 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
     attributed = bool(
         recipient_sig_valid and watermark_hmac_valid and commitment_valid and chain_valid
     )
-    verdict = "ATTRIBUTED" if attributed else "INCONCLUSIVE"
     recipient_name = r_pub["name"] if r_pub else rec_id
 
-    checks_summary = [
-        f"SHA3-256 Commitment: {'VALID' if commitment_valid else 'INVALID'}",
-        f"HMAC Watermark: {'VALID' if watermark_hmac_valid else 'INVALID'}",
-        f"Recipient ML-DSA-65: {'VALID' if recipient_sig_valid else 'INVALID'}",
-        f"Service Counter-Sig: {'VALID' if service_sig_valid else 'INVALID'}",
-        f"Ledger Chain: {'VALID' if chain_valid else 'INVALID'}",
-        f"Distribution Bundle: {'VALID' if dist_bundle_valid else 'INVALID'}",
-    ]
+    tamper_detected = not attributed
+    if attributed:
+        verdict = "ATTRIBUTED"
+        summary = (
+            f"Verdict: ATTRIBUTED. Recipient: '{recipient_name}' (ID: {rec_id}). "
+            f"All cryptographic proofs verified: SHA3-256 Commitment: VALID; HMAC Watermark: VALID; "
+            f"Recipient ML-DSA-65: VALID; Service Counter-Sig: VALID; Ledger Chain: VALID; Distribution Bundle: VALID."
+        )
+    else:
+        verdict = "TAMPERED"
+        tamper_reasons = []
+        if not commitment_valid:
+            tamper_reasons.append("SHA3-256 Commitment: INVALID / TAMPERED")
+        if not watermark_hmac_valid:
+            tamper_reasons.append("HMAC Watermark: INVALID / FORGED")
+        if not recipient_sig_valid:
+            tamper_reasons.append("Recipient ML-DSA-65 Signature: INVALID")
+        if not service_sig_valid:
+            tamper_reasons.append("Service Counter-Signature: INVALID")
+        if not chain_valid:
+            tamper_reasons.append("Merkle Ledger Hash-Chain: INTEGRITY COMPROMISED")
 
-    summary = (
-        f"Verdict: {verdict}. "
-        f"Recipient: '{recipient_name}' (ID: {rec_id}). "
-        f"Verification results: {'; '.join(checks_summary)}."
-    )
+        summary = (
+            f"🚨 TAMPERED DOCUMENT DETECTED: Provenance traced to recipient '{recipient_name}' (ID: {rec_id}), "
+            f"but cryptographic integrity check failed: {'; '.join(tamper_reasons)}. "
+            f"Decryption receipt recorded in ledger block #{entry.get('entry_index')}."
+        )
 
     # Phase 4 Evidence Bundle & Section 65B(4) Certificate for legacy document
     try:
@@ -1289,6 +1412,11 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
     return LeakAttributeResponse(
         verdict=verdict,
         attributed=attributed,
+        tamper_detected=tamper_detected,
+        tamper_type=("WATERMARK_HMAC_FORGERY" if not watermark_hmac_valid else
+                     "COMMITMENT_TAMPERED" if not commitment_valid else
+                     "SIGNATURE_INVALID" if not recipient_sig_valid else
+                     "CHAIN_TAMPERED" if not chain_valid else None) if tamper_detected else None,
         recipient_id=rec_id,
         recipient_name=recipient_name,
         timestamp=entry["timestamp"],
@@ -1350,7 +1478,8 @@ async def attribute_leaked_document(request: Request):
             raise HTTPException(status_code=400, detail="Missing 'pdf_base64' in JSON body.")
         pdf_bytes = b64_decode(pdf_b64)
 
-    return _execute_leak_attribution(pdf_bytes)
+    import anyio
+    return await anyio.to_thread.run_sync(_execute_leak_attribution, pdf_bytes)
 
 
 @router.get("/leak/certificate/{doc_id}/{recipient_id}", tags=["Forensic Attribution"])

@@ -48,7 +48,10 @@ interface DecryptResult {
 }
 
 interface LeakAttributeResult {
+  verdict?: string;
   attributed: boolean;
+  tamper_detected?: boolean;
+  tamper_type?: string;
   recipient_id?: string;
   recipient_name?: string;
   timestamp?: string;
@@ -66,6 +69,10 @@ interface LeakAttributeResult {
   pqc_algorithm_kem?: string;
   pqc_algorithm_dsa?: string;
   summary: string;
+  score?: number;
+  evidence_bundle?: any;
+  certificate_pdf_base64?: string;
+  certificate_filename?: string;
 }
 
 interface LedgerStatus {
@@ -150,10 +157,12 @@ export default function NayanXDashboard() {
 
   // Form States - Attribute
   const [leakFileInput, setLeakFileInput] = useState<File | null>(null);
+  const [selectedDocDescription, setSelectedDocDescription] = useState<string | null>(null);
   const [leakBase64Input, setLeakBase64Input] = useState<string>("");
   const [attributeResult, setAttributeResult] = useState<LeakAttributeResult | null>(null);
   const [attributeRawJson, setAttributeRawJson] = useState<any>(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  const offlineCounterRef = React.useRef<number>(0);
 
   // Demo Runner & Logs
   const [demoRunning, setDemoRunning] = useState(false);
@@ -161,33 +170,69 @@ export default function NayanXDashboard() {
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [tamperMessage, setTamperMessage] = useState<string | null>(null);
 
-  // Fetch initial data
+  // Fetch initial data & maintain liveness heartbeat
   useEffect(() => {
     setMounted(true);
-    fetchSystemStatus();
-    fetchRecipients();
-    fetchLedger();
-    fetchSampleDocs();
-  }, []);
 
-  const fetchSystemStatus = async () => {
+    const init = async () => {
+      const isOnline = await fetchSystemStatus();
+      if (isOnline) {
+        await Promise.allSettled([
+          fetchRecipients(),
+          fetchLedger(),
+          fetchSampleDocs(),
+        ]);
+      }
+    };
+    init();
+
+    // Heartbeat: periodically poll status and refresh data when server comes online
+    const timer = setInterval(async () => {
+      const online = await fetchSystemStatus();
+      if (online && !backendOnline) {
+        fetchRecipients();
+        fetchLedger();
+        fetchSampleDocs();
+      }
+    }, 5000);
+
+    return () => clearInterval(timer);
+  }, [backendOnline]);
+
+  const fetchSystemStatus = async (): Promise<boolean> => {
     try {
-      const res = await fetch(`${API_BASE}/status`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const res = await fetch(`${API_BASE}/status`, { signal: controller.signal });
+      clearTimeout(timeoutId);
       if (res.ok) {
         const data = await res.json();
         setSystemStatus(data);
+        offlineCounterRef.current = 0;
         setBackendOnline(true);
+        return true;
       } else {
-        setBackendOnline(false);
+        offlineCounterRef.current += 1;
+        if (offlineCounterRef.current >= 2) {
+          setBackendOnline(false);
+        }
+        return false;
       }
     } catch {
-      setBackendOnline(false);
+      offlineCounterRef.current += 1;
+      if (offlineCounterRef.current >= 2) {
+        setBackendOnline(false);
+      }
+      return false;
     }
   };
 
   const fetchRecipients = async () => {
     try {
-      const res = await fetch(`${API_BASE}/recipients`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(`${API_BASE}/recipients`, { signal: controller.signal });
+      clearTimeout(timeoutId);
       if (res.ok) {
         const data = await res.json();
         setRecipients(data);
@@ -196,26 +241,32 @@ export default function NayanXDashboard() {
           setDecryptSelectedRecipient(data[0].recipient_id);
         }
       }
-    } catch (e) {
-      console.error("Failed to load recipients", e);
+    } catch {
+      // Backend may be starting or offline; deferred silently without triggering dev overlay
     }
   };
 
   const fetchLedger = async () => {
     try {
-      const res = await fetch(`${API_BASE}/ledger`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(`${API_BASE}/ledger`, { signal: controller.signal });
+      clearTimeout(timeoutId);
       if (res.ok) {
         const data = await res.json();
         setLedgerData(data);
       }
-    } catch (e) {
-      console.error("Failed to load ledger", e);
+    } catch {
+      // Deferred silently without triggering dev overlay
     }
   };
 
   const fetchSampleDocs = async () => {
     try {
-      const res = await fetch(`${API_BASE}/samples/list`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(`${API_BASE}/samples/list`, { signal: controller.signal });
+      clearTimeout(timeoutId);
       if (res.ok) {
         const data: SampleDocument[] = await res.json();
         setSampleDocs(data);
@@ -245,8 +296,8 @@ export default function NayanXDashboard() {
         });
         setDecryptedCopies((prev) => ({ ...initialCopies, ...prev }));
       }
-    } catch (e) {
-      console.error("Failed to load sample docs", e);
+    } catch {
+      // Deferred silently without triggering dev overlay
     }
   };
 
@@ -284,6 +335,12 @@ startxref
   const handleEnroll = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!enrollName.trim()) return;
+
+    if (backendOnline === false) {
+      alert("⚠️ Backend Enclave is currently offline at http://127.0.0.1:8000.\nPlease verify the backend service is running.");
+      return;
+    }
+
     setLoadingAction("enroll");
     try {
       const payload: any = {
@@ -292,20 +349,32 @@ startxref
       };
       if (enrollCustomId.trim()) payload.recipient_id = enrollCustomId.trim();
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 12000);
+
       const res = await fetch(`${API_BASE}/enroll`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
+      clearTimeout(timeoutId);
+
       const data = await res.json();
       setEnrollRawJson(data);
       if (res.ok) {
         await fetchRecipients();
         setEnrollName("");
         setEnrollCustomId("");
+      } else {
+        alert(data.detail || "Enrollment failed. Please check backend status.");
       }
     } catch (err: any) {
-      setEnrollRawJson({ error: err.message });
+      const errMsg = err.name === "AbortError"
+        ? "Enrollment request timed out after 12s. Please check if the backend service is responding."
+        : (err.message || "Failed to connect to backend enrollment service.");
+      setEnrollRawJson({ error: errMsg });
+      alert(errMsg);
     } finally {
       setLoadingAction(null);
     }
@@ -454,11 +523,16 @@ startxref
   };
 
   // 4. POST /leak/attribute
-  const handleAttribute = async (sourceB64?: string, fileToUpload?: File) => {
+  const handleAttribute = async (sourceB64?: string, fileToUpload?: File, customDesc?: string) => {
+    setAttributeResult(null);
+    setAttributeRawJson(null);
+    if (customDesc) {
+      setSelectedDocDescription(customDesc);
+    }
     setLoadingAction("attribute");
     try {
       let res;
-      const targetFile = fileToUpload || leakFileInput;
+      const targetFile = fileToUpload || (sourceB64 ? null : leakFileInput);
 
       if (sourceB64) {
         res = await fetch(`${API_BASE}/leak/attribute`, {
@@ -525,31 +599,62 @@ startxref
     }
   };
 
-  // Download PDF
+  // Bulletproof PDF Download handler for Chromium, Edge, Firefox, and Safari
   const downloadPdf = (base64Str: string, filename: string) => {
+    if (!base64Str) {
+      alert("No document data available to download.");
+      return;
+    }
+    const cleanFilename = filename.toLowerCase().endsWith(".pdf") ? filename : `${filename}.pdf`;
     try {
-      const byteCharacters = atob(base64Str);
-      const byteNumbers = new Array(byteCharacters.length);
-      for (let i = 0; i < byteCharacters.length; i++) {
-        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      // Strip any whitespace / newlines
+      const cleanBase64 = base64Str.replace(/\s+/g, "");
+      const binaryString = window.atob(cleanBase64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
       }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const url = window.URL.createObjectURL(blob);
       const link = document.createElement("a");
+      link.style.display = "none";
       link.href = url;
-      link.download = filename;
+      link.download = cleanFilename;
+      link.setAttribute("download", cleanFilename);
       document.body.appendChild(link);
       link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-    } catch {
-      const link = document.createElement("a");
-      link.href = `data:application/pdf;base64,${base64Str}`;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+
+      // Defer revoking the object URL and removing from DOM by 60s
+      // Synchronous revocation causes Chromium/Edge to drop the suggested filename
+      // and save the file under its raw blob UUID without an extension.
+      setTimeout(() => {
+        try {
+          if (link.parentNode) {
+            document.body.removeChild(link);
+          }
+          window.URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      }, 60000);
+    } catch (e: any) {
+      console.error("PDF Blob download error:", e);
+      try {
+        const cleanBase64 = base64Str.replace(/\s+/g, "");
+        const link = document.createElement("a");
+        link.style.display = "none";
+        link.href = `data:application/pdf;base64,${cleanBase64}`;
+        link.download = cleanFilename;
+        link.setAttribute("download", cleanFilename);
+        document.body.appendChild(link);
+        link.click();
+        setTimeout(() => {
+          if (link.parentNode) document.body.removeChild(link);
+        }, 5000);
+      } catch (err: any) {
+        alert("Failed to download PDF: " + (err.message || e.message));
+      }
     }
   };
 
@@ -1134,8 +1239,12 @@ startxref
                       className="btn-sm-attribute"
                       onClick={() => {
                         const doc = sampleDocs.find((d) => d.recipient_id === "rec-alice-01");
-                        if (doc) handleAttribute(doc.pdf_base64);
-                        else alert("Document loading, please retry in a second.");
+                        if (doc) {
+                          setLeakFileInput(null);
+                          handleAttribute(doc.pdf_base64, undefined, "Alice Vance's Watermarked Copy (rec-alice-01)");
+                        } else {
+                          alert("Document loading, please retry in a second.");
+                        }
                       }}
                     >
                       🎯 Test in Leak Attribution
@@ -1172,8 +1281,12 @@ startxref
                       className="btn-sm-attribute"
                       onClick={() => {
                         const doc = sampleDocs.find((d) => d.recipient_id === "rec-bob-02");
-                        if (doc) handleAttribute(doc.pdf_base64);
-                        else alert("Document loading, please retry in a second.");
+                        if (doc) {
+                          setLeakFileInput(null);
+                          handleAttribute(doc.pdf_base64, undefined, "Bob Sterling's Watermarked Copy (rec-bob-02)");
+                        } else {
+                          alert("Document loading, please retry in a second.");
+                        }
                       }}
                     >
                       🎯 Test in Leak Attribution
@@ -1210,8 +1323,12 @@ startxref
                       className="btn-sm-attribute"
                       onClick={() => {
                         const doc = sampleDocs.find((d) => d.recipient_id === "rec-charlie-03");
-                        if (doc) handleAttribute(doc.pdf_base64);
-                        else alert("Document loading, please retry in a second.");
+                        if (doc) {
+                          setLeakFileInput(null);
+                          handleAttribute(doc.pdf_base64, undefined, "Charlie Miller's Watermarked Copy (rec-charlie-03)");
+                        } else {
+                          alert("Document loading, please retry in a second.");
+                        }
                       }}
                     >
                       🎯 Test in Leak Attribution
@@ -1253,8 +1370,12 @@ startxref
                       }}
                       onClick={() => {
                         const doc = sampleDocs.find((d) => d.filename === "sample_briefing.pdf");
-                        if (doc) handleAttribute(doc.pdf_base64);
-                        else alert("Document loading, please retry in a second.");
+                        if (doc) {
+                          setLeakFileInput(null);
+                          handleAttribute(doc.pdf_base64, undefined, "Clean Master Dossier (Unwatermarked)");
+                        } else {
+                          alert("Document loading, please retry in a second.");
+                        }
                       }}
                     >
                       🔍 Test Source (Unwatermarked)
@@ -1847,7 +1968,10 @@ startxref
                           <button
                             className="card-badge"
                             style={{ background: "rgba(255,255,255,0.12)", color: "#fff", cursor: "pointer" }}
-                            onClick={() => downloadPdf(copy.watermarked_pdf_base64!, `${rId}_watermarked.pdf`)}
+                            onClick={() => {
+                              const rName = recipients.find((r) => r.recipient_id === rId)?.name?.replace(/[^a-zA-Z0-9_-]/g, "_") || rId;
+                              downloadPdf(copy.watermarked_pdf_base64!, `${rName}_${rId}_watermarked.pdf`);
+                            }}
                           >
                             ⬇ Download PDF
                           </button>
@@ -1856,7 +1980,9 @@ startxref
                           className="card-badge"
                           style={{ background: "rgba(255,255,255,0.06)", color: "#cbd5e1", cursor: "pointer" }}
                           onClick={() => {
-                            handleAttribute(copy.watermarked_pdf_base64);
+                            setLeakFileInput(null);
+                            const rName = recipients.find((r) => r.recipient_id === rId)?.name || rId;
+                            handleAttribute(copy.watermarked_pdf_base64, undefined, `${rName}'s Watermarked Copy (${rId})`);
                           }}
                         >
                           🎯 Simulate Leak & Attribute
@@ -1914,7 +2040,8 @@ startxref
                   const file = e.dataTransfer.files?.[0];
                   if (file) {
                     setLeakFileInput(file);
-                    handleAttribute(undefined, file);
+                    setSelectedDocDescription(file.name);
+                    handleAttribute(undefined, file, file.name);
                   }
                 }}
                 onClick={() => {
@@ -1926,21 +2053,53 @@ startxref
                   type="file"
                   accept="application/pdf"
                   style={{ display: "none" }}
+                  onClick={(e) => {
+                    (e.currentTarget as HTMLInputElement).value = "";
+                  }}
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (file) {
                       setLeakFileInput(file);
-                      handleAttribute(undefined, file);
+                      setSelectedDocDescription(file.name);
+                      handleAttribute(undefined, file, file.name);
                     }
                   }}
                 />
                 <div style={{ fontSize: "28px", marginBottom: "6px" }}>📁</div>
                 <div style={{ fontSize: "14px", fontWeight: "600", color: "var(--text-primary)" }}>
-                  {leakFileInput ? `Selected: ${leakFileInput.name}` : "Click or Drag & Drop Leaked PDF Here"}
+                  {selectedDocDescription
+                    ? `Active Document: ${selectedDocDescription}`
+                    : leakFileInput
+                    ? `Selected: ${leakFileInput.name}`
+                    : "Click or Drag & Drop Leaked PDF Here"}
                 </div>
                 <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
                   Supports forensic metadata extraction and trailing stego anchor analysis
                 </div>
+                {(selectedDocDescription || leakFileInput || attributeResult) && (
+                  <button
+                    type="button"
+                    className="card-badge"
+                    style={{
+                      marginTop: "10px",
+                      background: "rgba(255, 255, 255, 0.08)",
+                      color: "var(--text-secondary)",
+                      border: "1px solid var(--border-subtle)",
+                      cursor: "pointer",
+                      padding: "4px 12px",
+                      fontSize: "11px",
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setLeakFileInput(null);
+                      setSelectedDocDescription(null);
+                      setAttributeResult(null);
+                      setAttributeRawJson(null);
+                    }}
+                  >
+                    ✕ Clear Document & Results
+                  </button>
+                )}
               </div>
 
               {/* Instant Test Buttons for Recipient Copies */}
@@ -1957,7 +2116,10 @@ startxref
                     }}
                     onClick={() => {
                       const doc = sampleDocs.find((d) => d.recipient_id === "rec-alice-01");
-                      if (doc) handleAttribute(doc.pdf_base64);
+                      if (doc) {
+                        setLeakFileInput(null);
+                        handleAttribute(doc.pdf_base64, undefined, "Alice Vance's Watermarked Copy (rec-alice-01)");
+                      }
                     }}
                   >
                     Test Alice&apos;s Copy (rec-alice-01)
@@ -1972,7 +2134,10 @@ startxref
                     }}
                     onClick={() => {
                       const doc = sampleDocs.find((d) => d.recipient_id === "rec-bob-02");
-                      if (doc) handleAttribute(doc.pdf_base64);
+                      if (doc) {
+                        setLeakFileInput(null);
+                        handleAttribute(doc.pdf_base64, undefined, "Bob Sterling's Watermarked Copy (rec-bob-02)");
+                      }
                     }}
                   >
                     Test Bob&apos;s Copy (rec-bob-02)
@@ -1987,7 +2152,10 @@ startxref
                     }}
                     onClick={() => {
                       const doc = sampleDocs.find((d) => d.recipient_id === "rec-charlie-03");
-                      if (doc) handleAttribute(doc.pdf_base64);
+                      if (doc) {
+                        setLeakFileInput(null);
+                        handleAttribute(doc.pdf_base64, undefined, "Charlie Miller's Watermarked Copy (rec-charlie-03)");
+                      }
                     }}
                   >
                     Test Charlie&apos;s Copy (rec-charlie-03)
@@ -2002,135 +2170,323 @@ startxref
                     }}
                     onClick={() => {
                       const doc = sampleDocs.find((d) => d.filename === "sample_briefing.pdf");
-                      if (doc) handleAttribute(doc.pdf_base64);
+                      if (doc) {
+                        setLeakFileInput(null);
+                        handleAttribute(doc.pdf_base64, undefined, "Clean Original Dossier (Unwatermarked)");
+                      }
                     }}
                   >
                     Test Unwatermarked Original
                   </button>
+                  <button
+                    className="card-badge"
+                    style={{
+                      background: "rgba(239, 68, 68, 0.12)",
+                      color: "#f87171",
+                      border: "1px solid rgba(239, 68, 68, 0.45)",
+                      cursor: "pointer",
+                      padding: "8px 14px",
+                      fontWeight: "600",
+                    }}
+                    onClick={() => {
+                      const doc = sampleDocs.find((d) => d.recipient_id === "rec-alice-01") || sampleDocs[0];
+                      if (doc && doc.pdf_base64) {
+                        setLeakFileInput(null);
+                        try {
+                          const binary = atob(doc.pdf_base64);
+                          // Tamper with hash characters to simulate forgery/alteration
+                          const tampered = binary.includes("watermark_hash")
+                            ? binary.replace(/"watermark_hash"\s*:\s*"([a-f0-9]{64})"/g, (_, h) => `"watermark_hash":"deadbeef${h.slice(8)}"`)
+                            : binary.slice(0, -30) + "%deadbeef00000000" + binary.slice(-14);
+                          handleAttribute(btoa(tampered), undefined, "Simulated Tampered Attack on Alice's Copy (Altered Watermark 'deadbeef...')");
+                        } catch {
+                          handleAttribute(doc.pdf_base64, undefined, "Simulated Tampered Copy");
+                        }
+                      }
+                    }}
+                  >
+                    🚨 Simulate Tamper Attack on Alice&apos;s Copy
+                  </button>
                 </div>
               </div>
 
-              {/* Attribution Verdict Card */}
-              {attributeResult && (
-                <div className={`verdict-banner ${attributeResult.attributed ? "success" : "danger"}`}>
-                  <div className="verdict-icon">{attributeResult.attributed ? "🎯" : "⚠️"}</div>
-                  <div className="verdict-details" style={{ width: "100%" }}>
-                    <h4>
-                      {attributeResult.attributed
-                        ? "CRYPTOGRAPHIC ATTRIBUTION CONFIRMED"
-                        : "UNATTRIBUTED / UNKNOWN SOURCE"}
-                    </h4>
-                    <p style={{ marginTop: "4px" }}>{attributeResult.summary}</p>
-
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-                        gap: "12px",
-                        marginTop: "16px",
-                      }}
-                    >
-                      <div className="portfolio-mini-card">
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>IDENTIFIED LEAKER</div>
-                        <div style={{ fontSize: "13px", fontWeight: "700", color: "var(--text-primary)", marginTop: "2px" }}>
-                          {attributeResult.recipient_name || "Unknown"} ({attributeResult.recipient_id || "N/A"})
-                        </div>
-                      </div>
-
-                      <div className="portfolio-mini-card">
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[1] SHA3-256 COMMIT-REVEAL</div>
-                        <div
-                          style={{
-                            fontSize: "12.5px",
-                            fontWeight: "700",
-                            color: attributeResult.commitment_valid ? "#ffffff" : "#94a3b8",
-                            marginTop: "2px",
-                          }}
-                        >
-                          {attributeResult.commitment_valid ? "✔ VERIFIED VALID" : "✖ FAILED / TAMPERED"}
-                        </div>
-                      </div>
-
-                      <div className="portfolio-mini-card">
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[2] HMAC WATERMARK DERIVATION</div>
-                        <div
-                          style={{
-                            fontSize: "12.5px",
-                            fontWeight: "700",
-                            color: attributeResult.watermark_hmac_valid ? "#ffffff" : "#94a3b8",
-                            marginTop: "2px",
-                          }}
-                        >
-                          {attributeResult.watermark_hmac_valid ? "✔ VERIFIED VALID" : "✖ FORGED / MISMATCH"}
-                        </div>
-                      </div>
-
-                      <div className="portfolio-mini-card">
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[3] RECIPIENT ML-DSA-65 SIG</div>
-                        <div
-                          style={{
-                            fontSize: "12.5px",
-                            fontWeight: "700",
-                            color: attributeResult.recipient_signature_valid ? "#ffffff" : "#94a3b8",
-                            marginTop: "2px",
-                          }}
-                        >
-                          {attributeResult.recipient_signature_valid ? "✔ VERIFIED VALID" : "✖ INVALID / ABSENT"}
-                        </div>
-                      </div>
-
-                      <div className="portfolio-mini-card">
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[4] SERVICE COUNTER-SIGNATURE</div>
-                        <div
-                          style={{
-                            fontSize: "12.5px",
-                            fontWeight: "700",
-                            color: attributeResult.service_signature_valid ? "#ffffff" : "#94a3b8",
-                            marginTop: "2px",
-                          }}
-                        >
-                          {attributeResult.service_signature_valid ? "✔ COUNTER-SIGNED" : "✖ ABSENT / UNVERIFIED"}
-                        </div>
-                      </div>
-
-                      <div className="portfolio-mini-card">
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[5] MERKLE HASH-CHAIN</div>
-                        <div
-                          style={{
-                            fontSize: "12.5px",
-                            fontWeight: "700",
-                            color: attributeResult.chain_valid ? "#ffffff" : "#94a3b8",
-                            marginTop: "2px",
-                          }}
-                        >
-                          {attributeResult.chain_valid ? "✔ INTACT & UNTAMPERED" : "✖ TAMPER DETECTED"}
-                        </div>
-                      </div>
-
-                      <div className="portfolio-mini-card">
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[6] DISTRIBUTION BUNDLE</div>
-                        <div
-                          style={{
-                            fontSize: "12.5px",
-                            fontWeight: "700",
-                            color: attributeResult.distribution_bundle_valid ? "#ffffff" : "#94a3b8",
-                            marginTop: "2px",
-                          }}
-                        >
-                          {attributeResult.distribution_bundle_valid ? "✔ AUTHENTIC BUNDLE" : "✖ UNBOUND"}
-                        </div>
-                      </div>
-
-                      <div className="portfolio-mini-card">
-                        <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>LEDGER AUDIT ANCHOR</div>
-                        <div style={{ fontSize: "13px", fontWeight: "700", color: "var(--text-primary)", marginTop: "2px" }}>
-                          Block #{attributeResult.ledger_index ?? "N/A"} (Chain Height: {attributeResult.chain_length})
-                        </div>
-                      </div>
-                    </div>
+              {/* Loading Indicator */}
+              {loadingAction === "attribute" && (
+                <div
+                  style={{
+                    padding: "24px",
+                    background: "rgba(255, 255, 255, 0.03)",
+                    borderRadius: "12px",
+                    border: "1px solid var(--border-subtle)",
+                    textAlign: "center",
+                    marginBottom: "20px",
+                  }}
+                >
+                  <div style={{ fontSize: "24px", marginBottom: "8px", animation: "spin 1s linear infinite" }}>⚙️</div>
+                  <div style={{ fontSize: "14px", fontWeight: "600", color: "var(--text-primary)" }}>
+                    Forensic Leak Attribution in Progress...
+                  </div>
+                  <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "4px" }}>
+                    {selectedDocDescription ? `Analyzing: ${selectedDocDescription}` : "Extracting stego payload and querying Merkle ledger..."}
                   </div>
                 </div>
               )}
+
+              {/* Attribution Verdict Card */}
+              {attributeResult && (() => {
+                const isAttributed = Boolean(attributeResult.attributed);
+                const isTampered = Boolean(
+                  attributeResult.verdict === "TAMPERED" ||
+                  attributeResult.tamper_detected ||
+                  (attributeResult.watermark_hash && !attributeResult.watermark_hmac_valid) ||
+                  (attributeResult.recipient_id && !attributeResult.commitment_valid) ||
+                  (!attributeResult.chain_valid)
+                );
+                const isSuspected = Boolean(attributeResult.verdict === "SUSPECTED");
+
+                const bannerClass = isAttributed
+                  ? "success"
+                  : isTampered
+                  ? "danger"
+                  : isSuspected
+                  ? "warning"
+                  : "neutral";
+
+                const bannerIcon = isAttributed ? "🎯" : isTampered ? "🚨" : isSuspected ? "⚠️" : "ℹ️";
+
+                const bannerTitle = isAttributed
+                  ? "CRYPTOGRAPHIC ATTRIBUTION CONFIRMED"
+                  : isTampered
+                  ? "CRYPTOGRAPHIC TAMPERING DETECTED — TAMPERED PDF IDENTIFIED"
+                  : isSuspected
+                  ? "PROBABILISTIC SUSPECT IDENTIFIED (INSUFFICIENT PROOF)"
+                  : "UNATTRIBUTED / CLEAN UNWATERMARKED SOURCE";
+
+                return (
+                  <div
+                    className={`verdict-banner ${bannerClass}`}
+                    style={
+                      isTampered
+                        ? {
+                            background: "rgba(239, 68, 68, 0.08)",
+                            border: "1.5px solid rgba(239, 68, 68, 0.6)",
+                            boxShadow: "0 0 24px rgba(239, 68, 68, 0.15)",
+                          }
+                        : undefined
+                    }
+                  >
+                    <div className="verdict-icon">{bannerIcon}</div>
+                    <div className="verdict-details" style={{ width: "100%" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+                        <h4
+                          style={{
+                            margin: 0,
+                            color: isAttributed ? "#10b981" : isTampered ? "#ef4444" : isSuspected ? "#f59e0b" : "#94a3b8",
+                            letterSpacing: "0.02em",
+                          }}
+                        >
+                          {bannerTitle}
+                        </h4>
+                        {isTampered && (
+                          <span
+                            style={{
+                              background: "rgba(239, 68, 68, 0.2)",
+                              border: "1px solid rgba(239, 68, 68, 0.5)",
+                              color: "#f87171",
+                              fontSize: "10.5px",
+                              fontWeight: "700",
+                              padding: "2px 8px",
+                              borderRadius: "4px",
+                              letterSpacing: "0.05em",
+                            }}
+                          >
+                            TAMPERED DOCUMENT
+                          </span>
+                        )}
+                      </div>
+                      <p
+                        style={{
+                          marginTop: "6px",
+                          lineHeight: "1.5",
+                          color: isTampered ? "#fca5a5" : "var(--text-secondary)",
+                        }}
+                      >
+                        {attributeResult.summary}
+                      </p>
+
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+                          gap: "12px",
+                          marginTop: "16px",
+                        }}
+                      >
+                        <div
+                          className="portfolio-mini-card"
+                          style={
+                            isTampered && attributeResult.recipient_id
+                              ? { border: "1px solid rgba(239, 68, 68, 0.35)", background: "rgba(239, 68, 68, 0.05)" }
+                              : undefined
+                          }
+                        >
+                          <div style={{ fontSize: "10px", color: isTampered ? "#f87171" : "var(--text-muted)" }}>
+                            {isTampered ? "TAMPERED COPY RECIPIENT" : isAttributed ? "IDENTIFIED LEAKER" : "CANDIDATE SOURCE"}
+                          </div>
+                          <div
+                            style={{
+                              fontSize: "13px",
+                              fontWeight: "700",
+                              color: isTampered
+                                ? "#ef4444"
+                                : isAttributed
+                                ? "#10b981"
+                                : "var(--text-primary)",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {attributeResult.recipient_name || "Unknown"} ({attributeResult.recipient_id || "N/A"})
+                          </div>
+                        </div>
+
+                        <div className="portfolio-mini-card">
+                          <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[1] SHA3-256 COMMIT-REVEAL</div>
+                          <div
+                            style={{
+                              fontSize: "12.5px",
+                              fontWeight: "700",
+                              color: attributeResult.commitment_valid ? "#10b981" : "#ef4444",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {attributeResult.commitment_valid ? "✔ VERIFIED VALID" : "✖ FAILED / TAMPERED"}
+                          </div>
+                        </div>
+
+                        <div
+                          className="portfolio-mini-card"
+                          style={
+                            !attributeResult.watermark_hmac_valid
+                              ? { border: "1px solid rgba(239, 68, 68, 0.4)", background: "rgba(239, 68, 68, 0.06)" }
+                              : undefined
+                          }
+                        >
+                          <div style={{ fontSize: "10px", color: !attributeResult.watermark_hmac_valid ? "#f87171" : "var(--text-muted)" }}>
+                            [2] HMAC WATERMARK DERIVATION
+                          </div>
+                          <div
+                            style={{
+                              fontSize: "12.5px",
+                              fontWeight: "700",
+                              color: attributeResult.watermark_hmac_valid ? "#10b981" : "#ef4444",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {attributeResult.watermark_hmac_valid ? "✔ VERIFIED VALID" : "✖ FORGED / MISMATCH"}
+                          </div>
+                        </div>
+
+                        <div className="portfolio-mini-card">
+                          <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[3] RECIPIENT ML-DSA-65 SIG</div>
+                          <div
+                            style={{
+                              fontSize: "12.5px",
+                              fontWeight: "700",
+                              color: attributeResult.recipient_signature_valid ? "#10b981" : "#ef4444",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {attributeResult.recipient_signature_valid ? "✔ VERIFIED VALID" : "✖ INVALID / ABSENT"}
+                          </div>
+                        </div>
+
+                        <div className="portfolio-mini-card">
+                          <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[4] SERVICE COUNTER-SIGNATURE</div>
+                          <div
+                            style={{
+                              fontSize: "12.5px",
+                              fontWeight: "700",
+                              color: attributeResult.service_signature_valid ? "#10b981" : "#ef4444",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {attributeResult.service_signature_valid ? "✔ COUNTER-SIGNED" : "✖ ABSENT / UNVERIFIED"}
+                          </div>
+                        </div>
+
+                        <div className="portfolio-mini-card">
+                          <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[5] MERKLE HASH-CHAIN</div>
+                          <div
+                            style={{
+                              fontSize: "12.5px",
+                              fontWeight: "700",
+                              color: attributeResult.chain_valid ? "#10b981" : "#ef4444",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {attributeResult.chain_valid ? "✔ INTACT & UNTAMPERED" : "✖ TAMPER DETECTED"}
+                          </div>
+                        </div>
+
+                        <div className="portfolio-mini-card">
+                          <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>[6] DISTRIBUTION BUNDLE</div>
+                          <div
+                            style={{
+                              fontSize: "12.5px",
+                              fontWeight: "700",
+                              color: attributeResult.distribution_bundle_valid ? "#10b981" : "#ef4444",
+                              marginTop: "2px",
+                            }}
+                          >
+                            {attributeResult.distribution_bundle_valid ? "✔ AUTHENTIC BUNDLE" : "✖ UNBOUND / TAMPERED"}
+                          </div>
+                        </div>
+
+                        <div className="portfolio-mini-card">
+                          <div style={{ fontSize: "10px", color: "var(--text-muted)" }}>LEDGER AUDIT ANCHOR</div>
+                          <div style={{ fontSize: "13px", fontWeight: "700", color: "var(--text-primary)", marginTop: "2px" }}>
+                            Block #{attributeResult.ledger_index ?? "N/A"} (Chain Height: {attributeResult.chain_length})
+                          </div>
+                        </div>
+                      </div>
+
+                      {attributeResult.certificate_pdf_base64 && (
+                        <div style={{ marginTop: "16px", display: "flex", gap: "10px", alignItems: "center" }}>
+                          <button
+                            className="btn-primary"
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: "8px",
+                              padding: "9px 16px",
+                              fontSize: "12.5px",
+                              fontWeight: "600",
+                              borderRadius: "8px",
+                              background: isTampered
+                                ? "linear-gradient(135deg, #dc2626, #991b1b)"
+                                : "linear-gradient(135deg, #2563eb, #1d4ed8)",
+                              color: "#ffffff",
+                              border: "none",
+                              cursor: "pointer",
+                              boxShadow: "0 2px 8px rgba(0, 0, 0, 0.25)",
+                            }}
+                            onClick={() => {
+                              if (attributeResult.certificate_pdf_base64) {
+                                downloadPdf(
+                                  attributeResult.certificate_pdf_base64,
+                                  attributeResult.certificate_filename || "Section_65B_Certificate.pdf"
+                                );
+                              }
+                            }}
+                          >
+                            📄 Download Section 65B(4) Court-Admissible Forensic Certificate (PDF)
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Raw JSON Response Inspector */}

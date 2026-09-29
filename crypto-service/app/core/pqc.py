@@ -28,18 +28,30 @@ from typing import Tuple, Optional
 
 logger = logging.getLogger("crypto_service.pqc")
 
-# Try liboqs import ONLY if shared library is actually available, avoiding slow git-clone fallbacks
+# Try liboqs import ONLY if shared library binary is actually available on disk,
+# completely avoiding liboqs-python's slow git-clone/compiler fallback
 _LIBOQS_AVAILABLE = False
 try:
     import ctypes
     import ctypes.util
     import os
+    from pathlib import Path
 
     lib_path = ctypes.util.find_library("oqs")
     oqs_dir = os.environ.get("LIBOQS_DIR", os.path.expanduser("~/_oqs"))
-    has_oqs_file = (lib_path is not None) or os.path.exists(oqs_dir)
 
-    if has_oqs_file:
+    def _has_compiled_oqs_binary() -> bool:
+        if lib_path and os.path.isfile(lib_path):
+            return True
+        oqs_path = Path(oqs_dir)
+        if oqs_path.is_dir():
+            for sub in ["bin", "lib", "lib64", ""]:
+                for name in ["oqs.dll", "liboqs.dll", "liboqs.so", "liboqs.dylib"]:
+                    if (oqs_path / sub / name).is_file():
+                        return True
+        return False
+
+    if _has_compiled_oqs_binary():
         import oqs
         _ = oqs.get_enabled_KEM_mechanisms()
         _LIBOQS_AVAILABLE = True

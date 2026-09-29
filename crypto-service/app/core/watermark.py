@@ -151,6 +151,14 @@ def extract_watermark_from_pdf(pdf_bytes: bytes) -> Optional[Dict[str, Any]]:
         reader = PdfReader(stream)
         meta = reader.metadata
         if meta:
+            if "/ForensicWatermarkConvenienceTag" in meta and meta["/ForensicWatermarkConvenienceTag"]:
+                try:
+                    payload = json.loads(str(meta["/ForensicWatermarkConvenienceTag"]))
+                    if "watermark_hash" in payload or "recipient_id" in payload:
+                        return payload
+                except Exception:
+                    pass
+
             if "/ForensicWatermark" in meta and meta["/ForensicWatermark"]:
                 try:
                     payload = json.loads(str(meta["/ForensicWatermark"]))
@@ -161,9 +169,10 @@ def extract_watermark_from_pdf(pdf_bytes: bytes) -> Optional[Dict[str, Any]]:
 
             if "/WatermarkHash" in meta and meta["/WatermarkHash"]:
                 # Partial payload or hash reference
+                prod = str(meta.get("/Producer", ""))
                 return {
                     "watermark_hash": str(meta["/WatermarkHash"]),
-                    "recipient_id": str(meta.get("/Producer", "")),
+                    "recipient_id": prod if prod and "pypdf" not in prod.lower() else "",
                 }
 
         # Check root object

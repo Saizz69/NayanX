@@ -33,9 +33,12 @@ from __future__ import annotations
 import sqlite3
 import json
 import hashlib
+import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone
+
+_global_ledger_lock = threading.RLock()
 
 
 def canonical_json(obj: Any) -> str:
@@ -59,6 +62,7 @@ class TamperEvidentLedger:
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = _global_ledger_lock
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -220,7 +224,7 @@ class TamperEvidentLedger:
             "timestamp": now_iso,
         }
 
-        with self._get_connection() as conn:
+        with self._lock, self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT entry_index, entry_hash FROM ledger_entries ORDER BY entry_index DESC LIMIT 1"
             )
@@ -302,7 +306,7 @@ class TamperEvidentLedger:
             "timestamp": now_iso,
         }
 
-        with self._get_connection() as conn:
+        with self._lock, self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT entry_index, entry_hash FROM ledger_entries ORDER BY entry_index DESC LIMIT 1"
             )
@@ -383,7 +387,7 @@ class TamperEvidentLedger:
             "timestamp": now_iso,
         }
 
-        with self._get_connection() as conn:
+        with self._lock, self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT entry_index, entry_hash FROM ledger_entries ORDER BY entry_index DESC LIMIT 1"
             )
@@ -455,7 +459,7 @@ class TamperEvidentLedger:
         now_iso = datetime.now(timezone.utc).isoformat()
         schema_ver = 2 if service_signature_b64 else 1
 
-        with self._get_connection() as conn:
+        with self._lock, self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT entry_index, entry_hash FROM ledger_entries ORDER BY entry_index DESC LIMIT 1"
             )
@@ -603,7 +607,7 @@ class TamperEvidentLedger:
         Merkle root, signs the block header using threshold 2-of-3 ML-DSA-65 validators,
         and commits it immutably to the ledger_blocks table.
         """
-        with self._get_connection() as conn:
+        with self._lock, self._get_connection() as conn:
             cursor = conn.execute(
                 "SELECT height, block_hash, end_entry_index FROM ledger_blocks ORDER BY height DESC LIMIT 1"
             )

@@ -69,6 +69,10 @@ class LocalKeystore:
             )
 
         self._passphrase = passphrase.encode("utf-8")
+        self._vault_key: Optional[bytes] = None
+        self._public_registry_cache: Optional[Dict[str, Any]] = None
+        self._vault_cache: Optional[Dict[str, Any]] = None
+        self._tardos_store_cache: Optional[Dict[str, Any]] = None
         self._init_vault()
 
     def _derive_vault_key(self, salt: bytes) -> bytes:
@@ -88,6 +92,9 @@ class LocalKeystore:
         else:
             salt = self.vault_salt_file.read_bytes()
 
+        # Pre-derive vault encryption key once during initialization
+        self._vault_key = self._derive_vault_key(salt)
+
         if not self.public_keys_file.exists():
             self.public_keys_file.write_text(json.dumps({}, indent=2))
 
@@ -98,7 +105,6 @@ class LocalKeystore:
             self.tardos_docs_file.write_text(json.dumps({}, indent=2))
 
         if not self.vault_file.exists():
-
             self._save_private_vault({})
 
         # Ensure Crypto-Service ML-DSA-65 Authority keypair exists
@@ -125,28 +131,42 @@ class LocalKeystore:
 
     def _load_private_vault(self) -> Dict[str, Any]:
         """Decrypts and loads private keys from the local software vault."""
-        salt = self.vault_salt_file.read_bytes()
-        vault_key = self._derive_vault_key(salt)
-        aesgcm = AESGCM(vault_key)
+        if self._vault_cache is not None:
+            return dict(self._vault_cache)
+
+        if not self.vault_file.exists():
+            self._vault_cache = {}
+            return {}
 
         data = self.vault_file.read_bytes()
         if len(data) < 28:
+            self._vault_cache = {}
             return {}
 
+        if self._vault_key is None:
+            salt = self.vault_salt_file.read_bytes()
+            self._vault_key = self._derive_vault_key(salt)
+
+        aesgcm = AESGCM(self._vault_key)
         nonce = data[:12]
         ct_with_tag = data[12:]
         try:
             plaintext = aesgcm.decrypt(nonce, ct_with_tag, None)
-            return json.loads(plaintext.decode("utf-8"))
+            res = json.loads(plaintext.decode("utf-8"))
+            self._vault_cache = res
+            return dict(res)
         except Exception as e:
             raise RuntimeError(f"Vault decryption failure. Check passphrase or integrity: {e}")
 
     def _save_private_vault(self, vault_data: Dict[str, Any]):
         """Encrypts and persists private keys using AES-256-GCM."""
-        salt = self.vault_salt_file.read_bytes()
-        vault_key = self._derive_vault_key(salt)
-        aesgcm = AESGCM(vault_key)
+        self._vault_cache = dict(vault_data)
 
+        if self._vault_key is None:
+            salt = self.vault_salt_file.read_bytes()
+            self._vault_key = self._derive_vault_key(salt)
+
+        aesgcm = AESGCM(self._vault_key)
         plaintext = json.dumps(vault_data).encode("utf-8")
         nonce = secrets.token_bytes(12)
         ct_with_tag = aesgcm.encrypt(nonce, plaintext, None)
@@ -154,15 +174,22 @@ class LocalKeystore:
 
     def _load_public_registry(self) -> Dict[str, Any]:
         """Load public key directory."""
+        if self._public_registry_cache is not None:
+            return dict(self._public_registry_cache)
+
         if not self.public_keys_file.exists():
+            self._public_registry_cache = {}
             return {}
         try:
-            return json.loads(self.public_keys_file.read_text(encoding="utf-8"))
+            data = json.loads(self.public_keys_file.read_text(encoding="utf-8"))
+            self._public_registry_cache = data
+            return dict(data)
         except Exception:
             return {}
 
     def _save_public_registry(self, registry: Dict[str, Any]):
         """Persist public key directory."""
+        self._public_registry_cache = dict(registry)
         self.public_keys_file.write_text(json.dumps(registry, indent=2), encoding="utf-8")
 
     def enroll_recipient(
@@ -339,14 +366,18 @@ class LocalKeystore:
         return rec is not None and rec.get("bundle") is not None
 
     def _load_tardos_store(self) -> Dict[str, Any]:
+        if self._tardos_store_cache is not None:
+            return self._tardos_store_cache
         if not self.tardos_docs_file.exists():
             return {}
         try:
-            return json.loads(self.tardos_docs_file.read_text(encoding="utf-8"))
+            self._tardos_store_cache = json.loads(self.tardos_docs_file.read_text(encoding="utf-8"))
+            return self._tardos_store_cache
         except Exception:
             return {}
 
     def _save_tardos_store(self, store: Dict[str, Any]):
+        self._tardos_store_cache = store
         self.tardos_docs_file.write_text(json.dumps(store, indent=2), encoding="utf-8")
 
     def store_tardos_document(

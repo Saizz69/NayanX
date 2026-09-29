@@ -123,8 +123,10 @@ class StructuredSourceCreateRequest(BaseModel):
 
 
 class LeakAttributeResponse(BaseModel):
-    verdict: str = "INCONCLUSIVE"  # "ATTRIBUTED", "SUSPECTED", "INCONCLUSIVE"
+    verdict: str = "INCONCLUSIVE"  # "ATTRIBUTED", "SUSPECTED", "INCONCLUSIVE", "TAMPERED"
     attributed: bool = False
+    tamper_detected: bool = False
+    tamper_type: Optional[str] = None
     recipient_id: Optional[str] = None
     recipient_name: Optional[str] = None
     timestamp: Optional[str] = None

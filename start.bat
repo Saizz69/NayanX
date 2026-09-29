@@ -8,7 +8,7 @@ echo.
 
 REM 1. Start Python Backend
 echo [1/2] Launching Crypto-Service Backend (FastAPI on http://127.0.0.1:8000)...
-start "Helios Backend (FastAPI)" cmd /k "cd /d ""%~dp0crypto-service"" && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
+start "Helios Backend (FastAPI)" cmd /k "cd /d ""%~dp0crypto-service"" && set PQC_VAULT_PASSPHRASE=airgap-helios-vault-2026-fips-compliant && set DEMO_MODE=true && python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
 
 REM 2. Start Next.js Frontend
 echo [2/2] Launching Helios Web Dashboard (Next.js on http://localhost:3000)...
