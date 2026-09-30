@@ -106,7 +106,7 @@ def generate_section_65b_certificate(evidence_data: Dict[str, Any]) -> bytes:
     preamble_text = (
         "This certificate relates to computer-produced forensic attribution records, cryptographic logs, "
         "and post-quantum signed document distribution receipts generated and maintained by the "
-        "NayanX Air-Gapped Forensic Attribution System."
+        "WebEye Air-Gapped Forensic Attribution System."
     )
     story.append(Paragraph(preamble_text, body_style))
     story.append(Spacer(1, 8))

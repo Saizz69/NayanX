@@ -6,9 +6,12 @@ Forensic Document Attribution Protocol (Air-Gapped Post-Quantum MVP).
 from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+import traceback
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
+from app.api.auth import auth_router
 from app.core.pqc import PQCEngine
 from app import config
 
@@ -42,7 +45,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="NayanX Post-Quantum Forensic Attribution Engine",
+    title="WebEye Post-Quantum Forensic Attribution Engine",
     description="""
     Offline, Air-Gapped Forensic Document-Attribution System for Hackathon.
     
@@ -57,16 +60,37 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Enable permissive CORS for local monorepo web app
+# Enable permissive CORS for local monorepo web app, including Private Network Access (PNA)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_private_network=True,
 )
 
+
+@app.middleware("http")
+async def add_private_network_headers(request, call_next):
+    response = await call_next(request)
+    if "origin" in request.headers:
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+    return response
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    tb = traceback.format_exc()
+    logger.error("Unhandled exception on %s: %s\n%s", request.url, exc, tb)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "traceback": tb},
+    )
+
 # Register routes at both root and /api for maximum compatibility
+app.include_router(auth_router)
+app.include_router(auth_router, prefix="/api")
 app.include_router(router)
 app.include_router(router, prefix="/api")
 
@@ -74,7 +98,7 @@ app.include_router(router, prefix="/api")
 @app.get("/", tags=["Root"])
 def root():
     return {
-        "service": "NayanX Post-Quantum Forensic Attribution Engine",
+        "service": "WebEye Post-Quantum Forensic Attribution Engine",
         "version": "1.0.0",
         "status": "operational",
         "pqc_standards": {

@@ -1,5 +1,5 @@
 """
-NayanX Attack Lab: Empirical Forensic Robustness & Collusion Simulation.
+WebEye Attack Lab: Empirical Forensic Robustness & Collusion Simulation.
 
 Executes real attacks against generated PDF artifacts and simulates coalition strategies:
 1. Text Diffing Attack (2-recipient diff analysis)
@@ -350,7 +350,7 @@ def run_tampered_commitments_attack(p_vector: List[float], codeword: List[int]) 
 # -----------------------------------------------------------------------------
 def run_all_attacks(collusion_runs: int = 500) -> Dict[str, Any]:
     print("=" * 80)
-    print("NAYANX FORENSIC ATTACK LAB: RUNNING REAL CRYPTOGRAPHIC & EMPIRICAL ATTACKS")
+    print("WEBEYE FORENSIC ATTACK LAB: RUNNING REAL CRYPTOGRAPHIC & EMPIRICAL ATTACKS")
     print("=" * 80)
 
     doc, p_vector, recipients = create_test_environment(num_recipients=6)

@@ -112,7 +112,7 @@ def embed_watermark_in_pdf(pdf_bytes: bytes, watermark_payload: Dict[str, Any]) 
         "/ForensicWatermark": payload_json,
         "/WatermarkHash": w_hash,
         "/Subject": f"Classified Forensic Document - Hash {w_hash[:16]}",
-        "/Producer": f"NayanX-PQC-ForensicEngine v2.0 ({rec_id})",
+        "/Producer": f"WebEye-PQC-ForensicEngine v2.0 ({rec_id})",
         "/Keywords": f"pqc;ml-kem-768;ml-dsa-65;wm:{w_hash}",
     }
     writer.add_metadata(metadata)

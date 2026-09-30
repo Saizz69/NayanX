@@ -13,13 +13,16 @@ from __future__ import annotations
 import json
 import uuid
 import secrets
+import hashlib
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
-from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException, status
+from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException, status, Depends
 from fastapi.responses import Response, FileResponse
 
 from app import config
+from app.api.auth import require_role, get_current_session, verify_recipient_ownership
+from app.core.auth_db import auth_db
 from app.core.pqc import PQCEngine, b64_encode, b64_decode
 from app.core.symmetric import (
     generate_document_key,
@@ -56,6 +59,7 @@ from app.models.schemas import (
     EngineStatusResponse,
     EnrollRequest,
     RecipientPublicRecord,
+    FlagRecipientRequest,
     EncryptResponse,
     EncryptJsonRequest,
     RecipientCiphertextBundle,
@@ -101,15 +105,15 @@ def get_system_status(request: Request):
 
 
 @router.get("/recipients", response_model=List[RecipientPublicRecord], tags=["Enrollment"])
-def list_recipients():
-    """Returns all enrolled recipients and their post-quantum public keys."""
+def list_recipients(session: Dict[str, Any] = Depends(require_role("head"))):
+    """Returns all enrolled recipients and their post-quantum public keys (Head Only)."""
     return keystore.get_all_recipients()
 
 
 @router.delete("/recipients/{recipient_id}", tags=["Enrollment"])
-def delete_recipient(recipient_id: str):
+def delete_recipient(recipient_id: str, session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    DELETE /recipients/{recipient_id}
+    DELETE /recipients/{recipient_id} (Head Only)
     Deletes an enrolled recipient and revokes their keys from both
     the public registry and local software vault.
     """
@@ -126,27 +130,174 @@ def delete_recipient(recipient_id: str):
     }
 
 
+@router.post("/recipients/{recipient_id}/flag", tags=["Enclave Security"])
+def flag_recipient_route(
+    recipient_id: str,
+    req: Optional[FlagRecipientRequest] = None,
+    session: Optional[Dict[str, Any]] = Depends(get_current_session),
+):
+    """
+    POST /recipients/{recipient_id}/flag
+    Flags an officer for unauthorized screenshot or document exfiltration attempts.
+    Records the violation into the public registry, audit ledger, and Head security notifications.
+    """
+    if session and session.get("role") == "recipient":
+        if session.get("recipient_id") != recipient_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Cannot report violation for another recipient.",
+            )
+
+    violation_type = req.violation_type if req and req.violation_type else "SCREENSHOT_ATTEMPT"
+    reason = req.reason if req and req.reason else "Hardware PrintScreen or Snipping Tool capture attempt intercepted"
+    details = req.details if req else None
+
+    try:
+        updated_rec = keystore.flag_recipient_violation(
+            recipient_id=recipient_id,
+            violation_type=violation_type,
+            reason=reason,
+            details=details,
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Recipient '{recipient_id}' not found.",
+        )
+
+    # Append security incident to append-only tamper-evident ledger
+    try:
+        ledger.append_entry(
+            event_type="ENCLAVE_SECURITY_FLAG",
+            recipient_id=recipient_id,
+            document_hash="CLASSIFIED_ENCLAVE_SESSION",
+            watermark_hash="FLAG_UNAUTHORIZED_SCREEN_CAPTURE",
+            recipient_signature=f"VIOLATION_CODE:{violation_type}",
+            service_signature=f"SECURITY_OFFICER_FLAGGED:{datetime.now(timezone.utc).isoformat()}",
+            metadata={
+                "violation_type": violation_type,
+                "reason": reason,
+                "details": details,
+                "officer_name": updated_rec.get("name", recipient_id),
+                "total_violations": updated_rec.get("total_violations", 1),
+            },
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger("crypto_service").warning(f"Could not append security flag to ledger: {e}")
+
+    # Immediately push notification to Head alert board
+    try:
+        auth_db.add_security_notification(
+            recipient_id=recipient_id,
+            recipient_name=updated_rec.get("name", recipient_id),
+            violation_type=violation_type,
+            reason=reason,
+            details=details,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger("crypto_service").warning(f"Could not save security notification: {e}")
+
+    return {
+        "status": "flagged",
+        "recipient_id": recipient_id,
+        "is_flagged": True,
+        "flag_reason": reason,
+        "violation_type": violation_type,
+        "total_violations": updated_rec.get("total_violations", 1),
+        "message": f"Officer '{recipient_id}' successfully FLAGGED. Reason: {reason}",
+    }
+
+
+@router.post("/recipients/{recipient_id}/unflag", tags=["Enclave Security"])
+def unflag_recipient_route(
+    recipient_id: str,
+    session: Dict[str, Any] = Depends(require_role("head")),
+):
+    """
+    POST /recipients/{recipient_id}/unflag (Head Only)
+    Clears security flag status for an officer after review.
+    """
+    try:
+        updated_rec = keystore.unflag_recipient(recipient_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Recipient '{recipient_id}' not found.",
+        )
+    return {
+        "status": "unflagged",
+        "recipient_id": recipient_id,
+        "is_flagged": False,
+        "message": f"Security flag cleared for officer '{recipient_id}'. Clearance restored.",
+    }
+
+
+@router.get("/recipients/flagged", tags=["Enclave Security"])
+def list_flagged_recipients_route(session: Dict[str, Any] = Depends(require_role("head"))):
+    """
+    GET /recipients/flagged (Head Only)
+    Returns all officers flagged for security violations alongside reasons and incident logs.
+    """
+    all_recs = keystore.get_all_recipients()
+    return [r for r in all_recs if r.get("is_flagged")]
+
+
+@router.get("/notifications", tags=["Enclave Security"])
+def get_security_notifications_route(
+    unread_only: bool = True,
+    session: Dict[str, Any] = Depends(require_role("head")),
+):
+    """
+    GET /notifications (Head Only)
+    Returns real-time security alerts triggered by recipient screenshot attempts.
+    """
+    return auth_db.get_security_notifications(unread_only=unread_only)
+
+
+@router.post("/notifications/{notif_id}/dismiss", tags=["Enclave Security"])
+def dismiss_security_notification_route(
+    notif_id: int,
+    session: Dict[str, Any] = Depends(require_role("head")),
+):
+    """
+    POST /notifications/{notif_id}/dismiss (Head Only)
+    Marks a security alert as acknowledged/dismissed.
+    """
+    success = auth_db.dismiss_notification(notif_id)
+    return {"success": success, "notif_id": notif_id}
+
+
 
 @router.post("/enroll", response_model=RecipientPublicRecord, tags=["Enrollment"])
-def enroll_recipient(req: EnrollRequest):
+def enroll_recipient(
+    req: EnrollRequest,
+    session: Dict[str, Any] = Depends(require_role("head")),
+):
     """
-    POST /enroll
+    POST /enroll (Head Only)
     1. Generates an ML-KEM-768 keypair for post-quantum key encapsulation (FIPS 203).
     2. Generates an ML-DSA-65 keypair for post-quantum digital signatures (FIPS 204).
     3. Seals private keys in the local encrypted software vault.
     4. Publishes public key IDs to the registry.
-
-    Production Note: In an HSM deployment, the HSM generates and holds the private keys;
-    this endpoint would invoke the HSM PKCS#11 C_GenerateKeyPair function.
+    5. Binds PQC cryptographic identity to user authentication credentials with default password '123456'.
     """
     recipient_id = req.recipient_id or f"rec-{uuid.uuid4().hex[:8]}"
 
-    # Check if already exists
+    # Check if already exists in keystore
     existing = keystore.get_recipient_public(recipient_id)
     if existing:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Recipient with ID '{recipient_id}' already enrolled.",
+        )
+
+    assigned_username = req.username.strip() if req.username and req.username.strip() else recipient_id
+    if auth_db.get_user_by_username(assigned_username):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"User account with username '{assigned_username}' already exists.",
         )
 
     # Generate PQC Keypairs
@@ -163,7 +314,26 @@ def enroll_recipient(req: EnrollRequest):
         role=req.role or "Special Analyst",
     )
 
+    # Atomically bind PQC identity to user credentials
+    assigned_password = req.password or "123456"
+    auth_db.create_user(
+        username=assigned_username,
+        password=assigned_password,
+        role="recipient",
+        recipient_id=recipient_id,
+    )
+
+    public_record["username"] = assigned_username
     return public_record
+
+
+@router.delete("/recipients/{recipient_id}", tags=["Recipient Registry"])
+def delete_recipient(recipient_id: str):
+    """Delete a recipient from the keystore."""
+    success = keystore.delete_recipient(recipient_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Recipient '{recipient_id}' not found.")
+    return {"status": "deleted", "recipient_id": recipient_id}
 
 
 def _execute_document_encryption(
@@ -262,9 +432,9 @@ def _execute_document_encryption(
 
 
 @router.get("/documents/{doc_id}/capacity", response_model=DocumentCapacityResponse, tags=["Document Operations"])
-def get_document_capacity(doc_id: str):
+def get_document_capacity(doc_id: str, session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    GET /documents/{id}/capacity
+    GET /documents/{id}/capacity (Head Only)
     Returns slot counts per channel and largest collusion size c supported at target error rate.
     """
     doc_rec = keystore.get_tardos_document(doc_id)
@@ -289,9 +459,9 @@ def get_document_capacity(doc_id: str):
 
 
 @router.post("/documents/structured", tags=["Document Operations"])
-def create_structured_document(req: StructuredSourceCreateRequest):
+def create_structured_document(req: StructuredSourceCreateRequest, session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    POST /documents/structured
+    POST /documents/structured (Head Only)
     Accepts JSON/markdown source with wording alternates {{a|b}} and recipient IDs.
     1. Parses wording slots and layout slots.
     2. Generates document secret material and derives secret p-vector via HMAC expansion.
@@ -417,10 +587,12 @@ def create_structured_document(req: StructuredSourceCreateRequest):
 
 
 @router.post("/documents/encrypt", response_model=EncryptResponse, tags=["Document Operations"])
-
-async def encrypt_document(request: Request):
+async def encrypt_document(
+    request: Request,
+    session: Dict[str, Any] = Depends(require_role("head")),
+):
     """
-    POST /documents/encrypt
+    POST /documents/encrypt (Head Only)
     Takes a PDF + list of recipient IDs:
     Supports both:
     1. application/json: { "pdf_base64": "...", "filename": "...", "recipient_ids": [...] }
@@ -462,8 +634,98 @@ async def encrypt_document(request: Request):
         return _execute_document_encryption(pdf_bytes, filename, recipient_ids)
 
 
+@router.get("/recipient/documents", tags=["Secure Recipient Viewer"])
+def get_recipient_assigned_documents(
+    session: Dict[str, Any] = Depends(get_current_session),
+):
+    """
+    GET /recipient/documents
+    Returns only the documents assigned specifically to the authenticated recipient.
+    Strictly isolated: a recipient cannot view any document bundles belonging to others.
+    """
+    rec_id = session.get("recipient_id")
+    if session.get("role") == "head":
+        store = keystore._load_distribution_store()
+        all_docs = []
+        seen = set()
+        for k, v in store.items():
+            dh = v.get("document_hash")
+            if dh and dh not in seen:
+                seen.add(dh)
+                bundle = v.get("bundle") or {}
+                fn = bundle.get("original_filename", "Classified_Briefing.pdf")
+                all_docs.append({
+                    "document_hash": dh,
+                    "recipient_id": v.get("recipient_id"),
+                    "title": f"Classified Dossier: {fn}",
+                    "filename": fn,
+                    "distributed_at": v.get("created_at"),
+                    "watermark_type": "2D DCT Spread-Spectrum + Tardos Codeword",
+                    "status": "Available for Secure Viewing",
+                })
+        return all_docs
+
+    if not rec_id:
+        return []
+
+    store = keystore._load_distribution_store()
+    assigned = []
+    seen = set()
+    for k, v in store.items():
+        if v.get("recipient_id") == rec_id:
+            dh = v.get("document_hash")
+            if dh and dh not in seen:
+                seen.add(dh)
+                bundle = v.get("bundle") or {}
+                fn = bundle.get("original_filename", "Classified_Briefing.pdf")
+                assigned.append({
+                    "document_hash": dh,
+                    "recipient_id": rec_id,
+                    "title": f"Classified Dossier: {fn}",
+                    "filename": fn,
+                    "distributed_at": v.get("created_at"),
+                    "watermark_type": "2D DCT Spread-Spectrum + Tardos Codeword",
+                    "status": "Available for Secure Viewing",
+                })
+
+    if config.SAMPLE_DOCS_DIR.exists():
+        for f in config.SAMPLE_DOCS_DIR.glob("*.pdf"):
+            if rec_id in f.name:
+                h = compute_sha256(f.read_bytes())
+                if h not in seen:
+                    seen.add(h)
+                    assigned.append({
+                        "document_hash": h,
+                        "recipient_id": rec_id,
+                        "title": f"Strategic Enclave Briefing ({f.name})",
+                        "filename": f.name,
+                        "distributed_at": datetime.now(timezone.utc).isoformat(),
+                        "watermark_type": "2D DCT Spread-Spectrum + Tardos Codeword",
+                        "status": "Available for Secure Viewing",
+                    })
+
+    if not assigned and config.SAMPLE_DOCS_DIR.exists():
+        sample_path = config.SAMPLE_DOCS_DIR / "sample_briefing.pdf"
+        if sample_path.exists():
+            h = compute_sha256(sample_path.read_bytes())
+            assigned.append({
+                "document_hash": h,
+                "recipient_id": rec_id,
+                "title": "Operation Helios Strategic Enclave Briefing",
+                "filename": "sample_briefing.pdf",
+                "distributed_at": datetime.now(timezone.utc).isoformat(),
+                "watermark_type": "2D DCT Spread-Spectrum + Tardos Codeword",
+                "status": "Available for Secure Viewing",
+            })
+
+    return assigned
+
+
 @router.post("/documents/decrypt", response_model=DecryptResponse, tags=["Document Operations"])
-def decrypt_document(req: DecryptRequest):
+def decrypt_document(
+    req: DecryptRequest,
+    session: Dict[str, Any] = Depends(get_current_session),
+):
     """
     POST /documents/decrypt
     Ordered 7-Step Pipeline (Fail-Closed Gate):
@@ -475,6 +737,9 @@ def decrypt_document(req: DecryptRequest):
     6. Verify Merkle inclusion proof
     7. Unwrap keys & render document
     """
+    # Strict Recipient Ownership Enforcement
+    verify_recipient_ownership(session, req.recipient_id)
+
     step_events: List[Dict[str, Any]] = []
     r_id = req.recipient_id
 
@@ -1211,7 +1476,7 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
         claimed_id = conv_payload.get("recipient_id") if conv_payload else None
         if not claimed_id:
             import re
-            m = re.search(rb'NayanX-PQC-ForensicEngine[^(]*\((rec-[a-f0-9]+)\)', leaked_pdf_bytes)
+            m = re.search(rb'(?:WebEye|NayanX)-PQC-ForensicEngine[^(]*\((rec-[a-f0-9]+)\)', leaked_pdf_bytes)
             if m:
                 claimed_id = m.group(1).decode("ascii")
 
@@ -1257,7 +1522,7 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
         claimed_id = conv_payload.get("recipient_id") if conv_payload else None
         if not claimed_id:
             import re
-            m = re.search(rb'NayanX-PQC-ForensicEngine[^(]*\((rec-[a-f0-9]+)\)', leaked_pdf_bytes)
+            m = re.search(rb'(?:WebEye|NayanX)-PQC-ForensicEngine[^(]*\((rec-[a-f0-9]+)\)', leaked_pdf_bytes)
             if m:
                 claimed_id = m.group(1).decode("ascii")
         r_pub = keystore.get_recipient_public(claimed_id) if claimed_id else None
@@ -1440,9 +1705,12 @@ def _execute_leak_attribution(leaked_pdf_bytes: bytes) -> LeakAttributeResponse:
 
 
 @router.post("/leak/attribute", response_model=LeakAttributeResponse, tags=["Forensic Attribution"])
-async def attribute_leaked_document(request: Request):
+async def attribute_leaked_document(
+    request: Request,
+    session: Dict[str, Any] = Depends(require_role("head")),
+):
     """
-    POST /leak/attribute
+    POST /leak/attribute (Head Only)
     Given a leaked PDF:
     Supports:
     1. application/json: { "pdf_base64": "..." }
@@ -1483,7 +1751,11 @@ async def attribute_leaked_document(request: Request):
 
 
 @router.get("/leak/certificate/{doc_id}/{recipient_id}", tags=["Forensic Attribution"])
-def get_forensic_certificate(doc_id: str, recipient_id: str):
+def get_forensic_certificate(
+    doc_id: str,
+    recipient_id: str,
+    session: Dict[str, Any] = Depends(require_role("head")),
+):
     """
     GET /leak/certificate/{doc_id}/{recipient_id}
     Generates and downloads an official Section 65B(4) / Section 63 BSA 2023 Electronic Evidence Certificate (PDF)
@@ -1546,9 +1818,9 @@ def get_forensic_certificate(doc_id: str, recipient_id: str):
 
 
 @router.get("/ledger", response_model=LedgerStatusResponse, tags=["Audit Ledger"])
-def get_ledger():
+def get_ledger(session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    GET /ledger
+    GET /ledger (Head Only)
     Returns the complete tamper-evident hash-chained audit ledger,
     including cryptographic integrity status across all blocks.
     """
@@ -1566,9 +1838,9 @@ def get_ledger():
 
 
 @router.get("/ledger/proof/{entry_id}", tags=["Audit Ledger"])
-def get_ledger_proof(entry_id: str):
+def get_ledger_proof(entry_id: str, session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    GET /ledger/proof/{entry_id}
+    GET /ledger/proof/{entry_id} (Head Only)
     Returns cryptographic Merkle inclusion proof for the specified ledger entry,
     enabling offline independent verification without trusting the central server.
     """
@@ -1613,9 +1885,9 @@ def get_ledger_proof(entry_id: str):
 
 
 @router.get("/ledger/checkpoint", tags=["Audit Ledger"])
-def get_ledger_checkpoint():
+def get_ledger_checkpoint(session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    GET /ledger/checkpoint
+    GET /ledger/checkpoint (Head Only)
     Exports an offline cryptographically signed ledger checkpoint signed by threshold ML-DSA validators.
     """
     try:
@@ -1625,9 +1897,9 @@ def get_ledger_checkpoint():
 
 
 @router.get("/ledger/blocks", tags=["Audit Ledger"])
-def get_ledger_blocks():
+def get_ledger_blocks(session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    GET /ledger/blocks
+    GET /ledger/blocks (Head Only)
     Returns all committed blocks in the ledger and their chain audit status.
     """
     return {
@@ -1637,9 +1909,9 @@ def get_ledger_blocks():
 
 
 @router.get("/ledger/blocks/{height}", tags=["Audit Ledger"])
-def get_ledger_block(height: int):
+def get_ledger_block(height: int, session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    GET /ledger/blocks/{height}
+    GET /ledger/blocks/{height} (Head Only)
     Returns a specific ledger block by height.
     """
     blk = ledger.get_block_by_height(height)
@@ -1649,9 +1921,9 @@ def get_ledger_block(height: int):
 
 
 @router.post("/demo/tamper", tags=["Demonstration & Judging"])
-def tamper_ledger_block(block_index: int = 1):
+def tamper_ledger_block(block_index: int = 1, session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    Adversarial Tamper Simulation for Judges:
+    Adversarial Tamper Simulation for Judges (Head Only):
     Directly mutates an existing ledger block in SQLite without re-signing.
     Allows proving that `/leak/attribute` and `GET /ledger` immediately detect the attack.
     """
@@ -1664,9 +1936,13 @@ def tamper_ledger_block(block_index: int = 1):
 
 
 @router.post("/demo/tamper-commitment", tags=["Demonstration & Judging"])
-def tamper_commitment(recipient_id: str = "rec-alice-01", document_hash: str = ""):
+def tamper_commitment(
+    recipient_id: str = "rec-alice-01",
+    document_hash: str = "",
+    session: Dict[str, Any] = Depends(require_role("head")),
+):
     """
-    Negative Test Simulation:
+    Negative Test Simulation (Head Only):
     Directly tampers the pre-distribution SHA3-256 commitment in keystore.
     Proves that `/leak/attribute` detects broken commit-reveal binding.
     """
@@ -1701,9 +1977,9 @@ def tamper_commitment(recipient_id: str = "rec-alice-01", document_hash: str = "
 
 
 @router.post("/demo/restore", tags=["Demonstration & Judging"])
-def restore_ledger():
+def restore_ledger(session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    Restores any tampered ledger blocks back to their verified cryptographic records.
+    Restores any tampered ledger blocks back to their verified cryptographic records (Head Only).
     """
     ledger.restore_all_tampered()
     audit = ledger.verify_chain_integrity()
@@ -1716,9 +1992,9 @@ def restore_ledger():
 
 
 @router.get("/samples/list", tags=["Document Samples & Provenance"])
-def list_sample_documents():
+def list_sample_documents(session: Dict[str, Any] = Depends(require_role("head"))):
     """
-    Returns available decrypted recipient documents and sample briefing for forensic testing.
+    Returns available decrypted recipient documents and sample briefing for forensic testing (Head Only).
     """
     from pathlib import Path
     samples = []
@@ -1784,7 +2060,7 @@ def list_sample_documents():
 
 
 @router.get("/samples/download/{filename}", tags=["Document Samples & Provenance"])
-def download_sample_document(filename: str):
+def download_sample_document(filename: str, session: Dict[str, Any] = Depends(require_role("head"))):
     """
     Directly downloads a recipient's watermarked PDF or the original classified briefing.
     """
@@ -1799,3 +2075,197 @@ def download_sample_document(filename: str):
         media_type="application/pdf",
         filename=safe_filename,
     )
+
+
+# ==============================================================================
+# SECURE RECIPIENT VIEWER: SERVER-SIDE RASTERIZATION & DCT WATERMARK PIPELINE
+# ==============================================================================
+
+from pydantic import BaseModel
+
+
+class SecureRenderPageRequest(BaseModel):
+    recipient_id: str
+    document_hash: Optional[str] = None
+    document_id: Optional[str] = None
+    pdf_base64: Optional[str] = None
+    page_index: int = 0
+    dpi_scale: float = 2.0
+    alpha: float = 3.5
+
+
+class VerifyDctWatermarkRequest(BaseModel):
+    image_base64: str
+    recipient_id: str
+    document_hash: Optional[str] = None
+    document_id: Optional[str] = None
+
+
+@router.post("/documents/secure-render-page", tags=["Secure Recipient Viewer"])
+def secure_render_document_page(
+    req: SecureRenderPageRequest,
+    session: Dict[str, Any] = Depends(get_current_session),
+):
+    """
+    Server-side rasterization and 2D DCT spread-spectrum watermarking pipeline.
+    Intercepts document access:
+    1. Enforces strict recipient ownership check (recipient cannot access another recipient's document).
+    2. Reconstitutes PDF bytes from memory (does NOT return raw PDF/DOCX to client).
+    3. Retrieves recipient's distribution seed (seed_r) and computes SHA3-256 commitment.
+    4. Rasterizes target page to an in-memory image buffer via headless PDF engine.
+    5. Embeds spread-spectrum watermark in mid-frequency 2D DCT coefficients.
+    6. Returns only the watermarked raster canvas payload to the secure client viewer.
+    """
+    verify_recipient_ownership(session, req.recipient_id)
+
+    import pypdfium2 as pdfium
+    from app.core.dct_watermark import embed_dct_spread_spectrum, image_to_base64_data_url
+
+    # 1. Resolve PDF bytes
+    pdf_bytes: Optional[bytes] = None
+
+    if req.pdf_base64:
+        try:
+            pdf_bytes = b64_decode(req.pdf_base64)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid pdf_base64 encoding.")
+    elif req.document_id:
+        doc_rec = keystore.get_tardos_document(req.document_id)
+        if doc_rec and "ref_pdf_b64" in doc_rec:
+            pdf_bytes = b64_decode(doc_rec["ref_pdf_b64"])
+    elif req.document_hash:
+        # Check sample documents for matching hash
+        if config.SAMPLE_DOCS_DIR.exists():
+            for f in config.SAMPLE_DOCS_DIR.glob("*.pdf"):
+                content = f.read_bytes()
+                if compute_sha256(content) == req.document_hash:
+                    pdf_bytes = content
+                    break
+
+    # Fallback to default sample document if still not resolved
+    if not pdf_bytes:
+        for candidate_name in ["sample_briefing.pdf", "sample_doc.pdf"]:
+            cand_path = config.SAMPLE_DOCS_DIR / candidate_name
+            if cand_path.exists():
+                pdf_bytes = cand_path.read_bytes()
+                break
+        
+        if not pdf_bytes:
+            # Check any PDF in sample docs dir
+            any_pdfs = list(config.SAMPLE_DOCS_DIR.glob("*.pdf")) if config.SAMPLE_DOCS_DIR.exists() else []
+            if any_pdfs:
+                pdf_bytes = any_pdfs[0].read_bytes()
+            else:
+                raise HTTPException(status_code=404, detail="No source document found for rasterization.")
+
+    doc_hash = compute_sha256(pdf_bytes)
+
+    # 2. Resolve recipient seed_r
+    seed_r = keystore.get_distribution_seed(req.recipient_id, doc_hash)
+    if not seed_r and req.document_id:
+        rec_state = keystore.get_tardos_recipient_state(req.document_id, req.recipient_id)
+        if rec_state and "seed_b64" in rec_state:
+            seed_r = b64_decode(rec_state["seed_b64"])
+
+    if not seed_r:
+        # Deterministically derive distribution seed from recipient_id and doc_hash
+        seed_r = hashlib.sha256(f"seed_r:{req.recipient_id}:{doc_hash}".encode("utf-8")).digest()
+        # Persist distribution record for consistency
+        keystore.store_distribution_record(
+            recipient_id=req.recipient_id,
+            document_hash=doc_hash,
+            seed_bytes=seed_r,
+            commitment_hex=compute_sha3_256(seed_r),
+            bundle_dict={"generated_for": "secure_viewer"},
+        )
+
+    commitment_r = compute_sha3_256(seed_r)
+
+    # 3. Headless server-side rasterization
+    try:
+        pdf_doc = pdfium.PdfDocument(pdf_bytes)
+        total_pages = len(pdf_doc)
+        if total_pages == 0:
+            raise HTTPException(status_code=400, detail="PDF contains 0 pages.")
+
+        page_idx = max(0, min(req.page_index, total_pages - 1))
+        page = pdf_doc[page_idx]
+        scale = max(1.0, min(req.dpi_scale, 3.0))
+        bitmap = page.render(scale=scale)
+        pil_image = bitmap.to_pil()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Headless rasterization error: {e}")
+
+    # 4. DCT mid-frequency spread-spectrum watermark injection
+    try:
+        watermarked_bgr, meta = embed_dct_spread_spectrum(
+            image=pil_image,
+            seed_r=seed_r,
+            alpha=req.alpha,
+        )
+        data_url = image_to_base64_data_url(watermarked_bgr, format="png")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"DCT watermarking failure: {e}")
+
+    # 5. Return locked-down raster payload (NEVER raw document bytes)
+    return {
+        "page_index": page_idx,
+        "total_pages": total_pages,
+        "width": meta["width"],
+        "height": meta["height"],
+        "watermarked_image_data": data_url,
+        "watermark_algorithm": meta["algorithm"],
+        "recipient_id": req.recipient_id,
+        "document_hash": doc_hash,
+        "seed_commitment": commitment_r,
+        "security_lockdown": True,
+        "metadata": meta,
+    }
+
+
+@router.post("/documents/verify-dct-watermark", tags=["Secure Recipient Viewer"])
+def verify_dct_watermark_endpoint(
+    req: VerifyDctWatermarkRequest,
+    session: Dict[str, Any] = Depends(get_current_session),
+):
+    """
+    Verifies if a raster page or intercepted screenshot contains the recipient's
+    mid-frequency 2D DCT spread-spectrum watermark using normalized cross-correlation.
+    """
+    verify_recipient_ownership(session, req.recipient_id)
+
+    import base64
+    from app.core.dct_watermark import detect_dct_watermark
+
+    # Strip data URL header if present
+    img_b64 = req.image_base64
+    if "," in img_b64:
+        img_b64 = img_b64.split(",", 1)[1]
+
+    try:
+        img_bytes = base64.b64decode(img_b64)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid image_base64 format.")
+
+    # Retrieve candidate seed_r
+    seed_r = None
+    if req.document_hash:
+        seed_r = keystore.get_distribution_seed(req.recipient_id, req.document_hash)
+
+    if not seed_r and req.document_id:
+        rec_state = keystore.get_tardos_recipient_state(req.document_id, req.recipient_id)
+        if rec_state and "seed_b64" in rec_state:
+            seed_r = b64_decode(rec_state["seed_b64"])
+
+    if not seed_r:
+        doc_hash = req.document_hash or "default"
+        seed_r = hashlib.sha256(f"seed_r:{req.recipient_id}:{doc_hash}".encode("utf-8")).digest()
+
+    det_result = detect_dct_watermark(img_bytes, seed_r)
+    return {
+        "recipient_id": req.recipient_id,
+        "seed_commitment": compute_sha3_256(seed_r),
+        **det_result,
+    }

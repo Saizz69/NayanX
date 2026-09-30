@@ -35,7 +35,7 @@ if not _env_passphrase:
             "is not set. Set PQC_VAULT_PASSPHRASE in the environment, or enable DEMO_MODE=true for testing."
         )
 else:
-    VAULT_PASSPHRASE = _env_passphrase
+    VAULT_PASSPHRASE = _env_passphrase.strip()
 
 HOST = os.environ.get("CRYPTO_SERVICE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CRYPTO_SERVICE_PORT", "8000"))

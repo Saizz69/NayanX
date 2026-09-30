@@ -55,15 +55,15 @@ def create_sample_pdf_file(filepath: Path) -> bytes:
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=letter)
     
-    # Header banner
+    # Header banner (generous margins, centered vertically in navy banner)
     c.setFillColor(colors.HexColor("#1e1b4b"))
-    c.rect(0, 720, 612, 72, fill=True, stroke=False)
+    c.rect(0, 705, 612, 87, fill=True, stroke=False)
     
     c.setFillColor(colors.HexColor("#ffffff"))
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(54, 755, "PROJECT HELIOS: POST-QUANTUM FORENSIC BRIEFING")
-    c.setFont("Helvetica", 10)
-    c.drawString(54, 735, "CLASSIFICATION: TOP SECRET // AIR-GAPPED DISTRIBUTION ONLY")
+    c.setFont("Helvetica-Bold", 15)
+    c.drawString(54, 750, "PROJECT HELIOS: POST-QUANTUM FORENSIC BRIEFING")
+    c.setFont("Helvetica", 9.5)
+    c.drawString(54, 730, "CLASSIFICATION: TOP SECRET // AIR-GAPPED DISTRIBUTION ONLY")
     
     # Body
     c.setFillColor(colors.HexColor("#0f172a"))

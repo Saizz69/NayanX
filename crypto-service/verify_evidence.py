@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NayanX Standalone Offline Cryptographic Evidence Verifier.
+WebEye Standalone Offline Cryptographic Evidence Verifier.
 
 Verifies:
 1. Block header chain (prev_hash linkage from Genesis to Head).
@@ -260,7 +260,7 @@ def verify_against_checkpoint(db_path: Path | str, checkpoint_path: Path | str) 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="NayanX Forensic Evidence Verifier (Pure-Python PQC, Offline Standalone)",
+        description="WebEye Forensic Evidence Verifier (Pure-Python PQC, Offline Standalone)",
     )
     parser.add_argument("--db", type=str, help="Path to SQLite ledger database (e.g. data/audit_ledger.db)")
     parser.add_argument("--proof", type=str, help="Path to exported Merkle proof JSON file")

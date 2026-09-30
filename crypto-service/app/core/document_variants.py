@@ -239,7 +239,7 @@ class StructuredDocument:
         c.line(LEFT_MARGIN, 70, 612 - LEFT_MARGIN, 70)
         c.setFillColor(colors.HexColor("#64748b"))
         c.setFont("Helvetica", 8)
-        c.drawString(LEFT_MARGIN, 55, "NAYANX SECURE PQC DOCUMENT — CONTENT-LEVEL FINGERPRINT EMBEDDED")
+        c.drawString(LEFT_MARGIN, 55, "WEBEYE SECURE PQC DOCUMENT — CONTENT-LEVEL FINGERPRINT EMBEDDED")
         c.drawString(400, 55, f"CHANNELS: WORDING ({wording_count}) | LAYOUT ({self.layout_slots_count})")
 
         # Labelled secondary convenience tag (NEVER sole basis of attribution)
@@ -248,9 +248,9 @@ class StructuredDocument:
                 **secondary_watermark_payload,
                 "note": "Convenience tag only. Attribution is computed from Tardos content/layout slots.",
             })
-            c.setAuthor(f"NayanX Convenience Tag: {secondary_watermark_payload.get('recipient_id', 'unknown')}")
+            c.setAuthor(f"WebEye Convenience Tag: {secondary_watermark_payload.get('recipient_id', 'unknown')}")
             c.setSubject(f"Forensic Hash: {secondary_watermark_payload.get('watermark_hash', '')}")
-            c.setCreator("NayanX Tardos Document Engine")
+            c.setCreator("WebEye Tardos Document Engine")
 
         c.save()
         pdf_bytes = buf.getvalue()

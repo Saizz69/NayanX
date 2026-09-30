@@ -127,7 +127,7 @@ class TamperEvidentLedger:
         now_iso = datetime.now(timezone.utc).isoformat()
         genesis_record = {
             "genesis": True,
-            "system": "NayanX Post-Quantum Forensic Attribution Ledger",
+            "system": "WebEye Post-Quantum Forensic Attribution Ledger",
             "pqc_kem": "ML-KEM-768 (FIPS 203)",
             "pqc_dsa": "ML-DSA-65 (FIPS 204)",
             "timestamp": now_iso,

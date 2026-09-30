@@ -32,6 +32,7 @@ import secrets
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
+import uuid
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -68,7 +69,7 @@ class LocalKeystore:
                 "Keystore initialization failed: Vault passphrase is required and was not provided in env or parameter."
             )
 
-        self._passphrase = passphrase.encode("utf-8")
+        self._passphrase = passphrase.strip().encode("utf-8")
         self._vault_key: Optional[bytes] = None
         self._public_registry_cache: Optional[Dict[str, Any]] = None
         self._vault_cache: Optional[Dict[str, Any]] = None
@@ -249,6 +250,68 @@ class LocalKeystore:
         """List all enrolled recipients with public keys."""
         registry = self._load_public_registry()
         return list(registry.values())
+
+    def delete_recipient(self, recipient_id: str) -> bool:
+        """Deletes a recipient from public registry and private vault."""
+        registry = self._load_public_registry()
+        found = False
+        if recipient_id in registry:
+            del registry[recipient_id]
+            self._save_public_registry(registry)
+            found = True
+        vault = self._load_private_vault()
+        if recipient_id in vault:
+            del vault[recipient_id]
+            self._save_private_vault(vault)
+            found = True
+        return found
+
+    def flag_recipient_violation(
+        self,
+        recipient_id: str,
+        violation_type: str = "SCREENSHOT_ATTEMPT",
+        reason: str = "Hardware PrintScreen or Snipping Tool capture attempt intercepted",
+        details: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Flags a recipient for an enclave security violation (e.g. screenshot or unauthorized capture attempt).
+        Records timestamp, violation type, explicit reason, and incident history.
+        """
+        registry = self._load_public_registry()
+        rec = registry.get(recipient_id)
+        if not rec:
+            raise KeyError(f"Recipient '{recipient_id}' not found in public registry.")
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        rec["is_flagged"] = True
+        rec["flag_reason"] = reason
+        rec["flagged_at"] = now_iso
+
+        if "security_violations" not in rec or not isinstance(rec["security_violations"], list):
+            rec["security_violations"] = []
+
+        violation_entry = {
+            "violation_id": f"viol-{uuid.uuid4().hex[:8]}",
+            "violation_type": violation_type,
+            "reason": reason,
+            "details": details or "Classified document screen capture intercepted by enclave guard.",
+            "timestamp": now_iso,
+        }
+        rec["security_violations"].append(violation_entry)
+        rec["total_violations"] = len(rec["security_violations"])
+        self._save_public_registry(registry)
+        return rec
+
+    def unflag_recipient(self, recipient_id: str) -> Dict[str, Any]:
+        """Clears the flagged security status for a recipient after review."""
+        registry = self._load_public_registry()
+        rec = registry.get(recipient_id)
+        if not rec:
+            raise KeyError(f"Recipient '{recipient_id}' not found in public registry.")
+        rec["is_flagged"] = False
+        rec["flag_reason"] = None
+        self._save_public_registry(registry)
+        return rec
 
     def get_recipient_private_keys(self, recipient_id: str) -> Optional[Dict[str, bytes]]:
         """

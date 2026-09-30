@@ -1,12 +1,12 @@
-# NayanX: Cryptographic & Forensic Limitations (`KNOWN_LIMITS.md`)
+# WebEye: Cryptographic & Forensic Limitations (`KNOWN_LIMITS.md`)
 
-This document discloses the exact technical, mathematical, and operational limitations of the NayanX air-gapped forensic document attribution system. In compliance with strict forensic engineering standards, no marketing claims of "100% security", "zero false positives", or "absolute tamper-proof guarantees" are made. Every metric in NayanX is bounded by empirical calibration and stated assumptions.
+This document discloses the exact technical, mathematical, and operational limitations of the WebEye air-gapped forensic document attribution system. In compliance with strict forensic engineering standards, no marketing claims of "100% security", "zero false positives", or "absolute tamper-proof guarantees" are made. Every metric in WebEye is bounded by empirical calibration and stated assumptions.
 
 ---
 
 ## 1. Dual-Channel Robustness: Content Wording vs. Micro-Layout Spacing
 
-NayanX embeds forensic fingerprinting across two distinct physical channels:
+WebEye embeds forensic fingerprinting across two distinct physical channels:
 1. **Content Wording Channel (`{{a|b}}` synonym slots):**
    - **Resilience:** Survives manual re-typing, text copy-pasting, document re-formatting, machine translation, and optical character recognition (OCR).
    - **Limitation:** Can be modified if an adversary manually edits or removes specific sentences, or if two colluders detect wording differences through text diffing.
@@ -48,7 +48,7 @@ A server-side gate cannot prevent an administrative compromise of the host serve
 
 ## 4. Pure-Python Post-Quantum Reference Implementations
 
-NayanX utilizes pure-Python implementations of NIST FIPS 203 (ML-KEM-768) and FIPS 204 (ML-DSA-65) (`kyber-py` and `dilithium-py`):
+WebEye utilizes pure-Python implementations of NIST FIPS 203 (ML-KEM-768) and FIPS 204 (ML-DSA-65) (`kyber-py` and `dilithium-py`):
 - **Timing Side Channels:** Pure-Python arithmetic is **not constant-time**. On shared cloud hardware or co-located virtual machines, timing fluctuations and cache access patterns could potentially leak private key information to a local side-channel attacker.
 - **Production Remedy:** Deploy compiled, constant-time C implementations (such as Open Quantum Safe `liboqs`) with hardware AES-NI and AVX2 vector acceleration.
 
@@ -59,7 +59,7 @@ NayanX utilizes pure-Python implementations of NIST FIPS 203 (ML-KEM-768) and FI
 Forensic document attribution establishes the provenance of the **electronic copy**:
 - The cryptographic scorecard proves that a specific recipient's key material or authenticated session was used to generate the leaked document variant.
 - **What it does NOT prove:** It does not identify the physical human being who pressed the keyboard or captured a photograph of the screen. A compromised workstation, shoulder-surfing colleague, or stolen credential could leak a document assigned to an innocent analyst.
-- Consequently, NayanX outputs an **Attribution Scorecard and Section 65B(4) Evidence Certificate** for human forensic examiners, rather than an automated judicial verdict.
+- Consequently, WebEye outputs an **Attribution Scorecard and Section 65B(4) Evidence Certificate** for human forensic examiners, rather than an automated judicial verdict.
 
 ---
 

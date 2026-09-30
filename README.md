@@ -1,4 +1,4 @@
-# Helios — Air-Gapped Forensic Document-Attribution System
+# WebEye — Air-Gapped Forensic Document-Attribution System
 
 An offline, air-gapped forensic document-attribution and post-quantum provenance protocol designed for defense, intelligence, and high-security enterprise enclaves.
 
@@ -7,7 +7,7 @@ An offline, air-gapped forensic document-attribution and post-quantum provenance
 ## Architecture Overview
 
 ```
-NayanX/
+WebEye/
 ├── crypto-service/          # Python 3.12/3.13 + FastAPI Post-Quantum Cryptographic Engine
 │   ├── app/
 │   │   ├── core/
@@ -23,9 +23,9 @@ NayanX/
 │   ├── test_api.py          # Automated integration & unit test suite
 │   └── requirements.txt
 │
-└── web/                     # Next.js 16 (App Router, TypeScript) Helios Dashboard UI
+└── web/                     # Next.js 16 (App Router, TypeScript) WebEye Dashboard UI
     ├── src/app/
-    │   ├── page.tsx         # Helios Dark Obsidian interactive dashboard & JSON inspector
+    │   ├── page.tsx         # WebEye Dark Obsidian interactive dashboard & JSON inspector
     │   ├── layout.tsx       # Root layout & typography
     │   └── globals.css      # Custom Vanilla CSS tokens, neon glow, and glassmorphism
     └── package.json

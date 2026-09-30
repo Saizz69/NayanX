@@ -1,8 +1,10 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import Link from "next/link";
+import SecureViewer from "@/components/SecureViewer";
 
-const API_BASE = process.env.NEXT_PUBLIC_CRYPTO_API_URL || "http://127.0.0.1:8000";
+const API_BASE = process.env.NEXT_PUBLIC_CRYPTO_API_URL || "/crypto-api";
 
 interface Recipient {
   recipient_id: string;
@@ -13,6 +15,10 @@ interface Recipient {
   kem_public_key: string;
   dsa_public_key: string;
   created_at: string;
+  is_flagged?: boolean;
+  flag_reason?: string;
+  flagged_at?: string;
+  total_violations?: number;
 }
 
 interface CiphertextBundle {
@@ -97,8 +103,15 @@ interface SampleDocument {
   download_url: string;
 }
 
-export default function NayanXDashboard() {
+export default function WebEyeDashboard({ isHeadRoute = false }: { isHeadRoute?: boolean }) {
   const [mounted, setMounted] = useState(false);
+
+  // Authentication & Current Operator
+  const [currentUser, setCurrentUser] = useState<any>(null);
+
+  // Live Security Notifications
+  const [securityNotifications, setSecurityNotifications] = useState<any[]>([]);
+  const [unreadAlerts, setUnreadAlerts] = useState<any[]>([]);
 
   // Navigation State
   const [activeNav, setActiveNav] = useState<string>("dashboard");
@@ -120,6 +133,7 @@ export default function NayanXDashboard() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showSearchDropdown, setShowSearchDropdown] = useState(false);
   const [selectedPeriod, setSelectedPeriod] = useState<string>("1Y");
+  const [selectedFlowLayer, setSelectedFlowLayer] = useState<number>(0);
 
   // Modals
   const [showHsmModal, setShowHsmModal] = useState(false);
@@ -169,32 +183,92 @@ export default function NayanXDashboard() {
   const [demoLogs, setDemoLogs] = useState<string[]>([]);
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [tamperMessage, setTamperMessage] = useState<string | null>(null);
+  const [activeFlowchartLayer, setActiveFlowchartLayer] = useState<number>(1);
+  const [flowchartViewMode, setFlowchartViewMode] = useState<"detailed" | "overview">("detailed");
+  const [activeSecureViewerCopy, setActiveSecureViewerCopy] = useState<any | null>(null);
+
+  // Fetch security notifications from crypto-service
+  const fetchNotifications = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/notifications`, { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        setSecurityNotifications(data);
+        const unread = data.filter((n: any) => !n.is_read);
+        setUnreadAlerts(unread);
+      }
+    } catch {
+      // ignore in offline mode
+    }
+  };
+
+  const dismissNotification = async (id: number) => {
+    try {
+      await fetch(`${API_BASE}/notifications/${id}/dismiss`, { method: "POST" });
+      await fetchNotifications();
+    } catch (e) {
+      console.error("Failed to dismiss notification:", e);
+    }
+  };
+
+  // Logout handler
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {}
+    window.location.href = "/login";
+  };
 
   // Fetch initial data & maintain liveness heartbeat
   useEffect(() => {
     setMounted(true);
 
-    const init = async () => {
+    const checkAuthAndInit = async () => {
+      try {
+        const meRes = await fetch("/api/auth/me", { cache: "no-store" });
+        if (!meRes.ok) {
+          window.location.href = "/login";
+          return;
+        }
+        const meData = await meRes.json();
+        if (meData.user?.role !== "head") {
+          if (meData.user?.role === "recipient") {
+            window.location.href = "/recipient";
+          } else {
+            window.location.href = "/login";
+          }
+          return;
+        }
+        setCurrentUser(meData.user);
+      } catch {
+        window.location.href = "/login";
+        return;
+      }
+
       const isOnline = await fetchSystemStatus();
       if (isOnline) {
         await Promise.allSettled([
           fetchRecipients(),
           fetchLedger(),
           fetchSampleDocs(),
+          fetchNotifications(),
         ]);
       }
     };
-    init();
+    checkAuthAndInit();
 
-    // Heartbeat: periodically poll status and refresh data when server comes online
+    // Heartbeat: periodically poll status, notifications, and refresh data
     const timer = setInterval(async () => {
       const online = await fetchSystemStatus();
-      if (online && !backendOnline) {
-        fetchRecipients();
-        fetchLedger();
-        fetchSampleDocs();
+      if (online) {
+        fetchNotifications();
+        if (!backendOnline) {
+          fetchRecipients();
+          fetchLedger();
+          fetchSampleDocs();
+        }
       }
-    }, 5000);
+    }, 4000);
 
     return () => clearInterval(timer);
   }, [backendOnline]);
@@ -270,31 +344,8 @@ export default function NayanXDashboard() {
       if (res.ok) {
         const data: SampleDocument[] = await res.json();
         setSampleDocs(data);
-
-        // Pre-populate decryptedCopies from sample docs so the user can test immediately
-        const initialCopies: Record<string, DecryptResult> = {};
-        data.forEach((doc) => {
-          if (doc.watermarked && doc.recipient_id) {
-            initialCopies[doc.recipient_id] = {
-              recipient_id: doc.recipient_id,
-              document_hash: "30d3c92ff7c8487f6ac6264c47ac126a0ad67b85a3a78290e631901465fc4ee1",
-              watermark_hash:
-                doc.recipient_id === "rec-alice-01"
-                  ? "be560f47474b3f7b..."
-                  : doc.recipient_id === "rec-bob-02"
-                  ? "d74c9da297a97dac..."
-                  : "49e803e358182263...",
-              timestamp: new Date().toISOString(),
-              signature: "PQC_FIPS_204_AUTHENTICATED",
-              ledger_entry: {
-                entry_index: doc.recipient_id === "rec-alice-01" ? 1 : doc.recipient_id === "rec-bob-02" ? 11 : 29,
-              },
-              watermarked_pdf_base64: doc.pdf_base64,
-              original_filename: doc.filename,
-            };
-          }
-        });
-        setDecryptedCopies((prev) => ({ ...initialCopies, ...prev }));
+        // Decrypted copies remain driven by real operations or live sessions
+        setSampleDocs(data);
       }
     } catch {
       // Deferred silently without triggering dev overlay
@@ -303,7 +354,7 @@ export default function NayanXDashboard() {
 
   // Helper to generate sample PDF bytes in browser
   const createSamplePdfBase64 = (title: string): string => {
-    const text = `NAYANX CLASSIFIED AIR-GAPPED BRIEFING - ${title} - PQC FIPS 203 & 204 ENCLAVE`;
+    const text = `WEBEYE CLASSIFIED AIR-GAPPED BRIEFING - ${title} - PQC FIPS 203 & 204 ENCLAVE`;
     const pdfContent = `%PDF-1.4
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
 2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
@@ -346,6 +397,7 @@ startxref
       const payload: any = {
         name: enrollName.trim(),
         role: enrollRole.trim(),
+        password: "123456",
       };
       if (enrollCustomId.trim()) payload.recipient_id = enrollCustomId.trim();
 
@@ -407,6 +459,22 @@ startxref
       }
     } catch (err: any) {
       alert(`Network error deleting recipient: ${err.message}`);
+    }
+  };
+
+  const handleUnflagRecipient = async (recipientId: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/recipients/${encodeURIComponent(recipientId)}/unflag`, {
+        method: "POST",
+      });
+      if (res.ok) {
+        await fetchRecipients();
+      } else {
+        const d = await res.json().catch(() => ({}));
+        alert(`Failed to restore clearance: ${d.detail || "Server error"}`);
+      }
+    } catch (err: any) {
+      alert(`Network error unflagging officer: ${err.message}`);
     }
   };
 
@@ -685,29 +753,8 @@ startxref
       const recRes = await fetch(`${API_BASE}/recipients`);
       let currentRecipients: Recipient[] = await recRes.json();
 
-      // If fewer than 2 recipients exist, enroll test officers to ensure multi-recipient demo works
-      if (currentRecipients.length < 2) {
-        log("ℹ Fewer than 2 officers found. Enrolling demo officers into post-quantum registry...");
-        const defaultDemoOfficers = [
-          { name: "Alice Vance", role: "Chief Intelligence Officer", id: "rec-alice-01" },
-          { name: "Bob Sterling", role: "Senior Cryptanalyst", id: "rec-bob-02" },
-        ];
-        for (const officer of defaultDemoOfficers) {
-          const exists = currentRecipients.some((r) => r.recipient_id === officer.id);
-          if (!exists) {
-            const enrollRes = await fetch(`${API_BASE}/enroll`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name: officer.name, role: officer.role, recipient_id: officer.id }),
-            });
-            if (enrollRes.ok) {
-              const newRec = await enrollRes.json();
-              log(`✔ Generated fresh PQC keypair for ${newRec.name} (ML-KEM-768 / ML-DSA-65)`);
-            }
-          }
-        }
-        const updatedRecRes = await fetch(`${API_BASE}/recipients`);
-        currentRecipients = await updatedRecRes.json();
+      if (!currentRecipients || currentRecipients.length === 0) {
+        throw new Error("No enrolled officers found in Keystore. Please enroll an officer in the Officer Keystore panel first.");
       }
 
       setRecipients(currentRecipients);
@@ -729,7 +776,7 @@ startxref
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           pdf_base64: b64,
-          filename: "operation_nayanx_intel.pdf",
+          filename: "operation_webeye_intel.pdf",
           recipient_ids: targetIds,
         }),
       });
@@ -874,9 +921,9 @@ startxref
       {/* 1. Left Sidebar */}
       <aside className="sidebar">
         <div className="brand-header">
-          <div className="brand-icon">NX</div>
+          <div className="brand-icon">WE</div>
           <div>
-            <div className="brand-title">NayanX Forensic</div>
+            <div className="brand-title">WebEye</div>
             <div className="brand-subtitle">PQC Enclave v1.0</div>
           </div>
         </div>
@@ -918,6 +965,14 @@ startxref
           >
             <span>⛓️</span> Merkle Ledger
           </button>
+          <Link
+            href="/viewer"
+            className="nav-item"
+            style={{ textDecoration: "none" }}
+            title="Open Server-Rendered Zero-Text Canvas Recipient Viewer with 2D DCT Watermarking"
+          >
+            <span>🔒</span> Secure Viewer
+          </Link>
         </nav>
 
         <div className="sidebar-footer">
@@ -937,7 +992,7 @@ startxref
         <header className="top-header">
           <div className="header-greeting">
             <h1>
-              Welcome, <span>Sai</span>
+              Welcome, <span>{currentUser?.name || currentUser?.username || "Head Commander"}</span>
             </h1>
             <p>Air-gapped forensic document attribution & post-quantum provenance overview</p>
           </div>
@@ -1038,13 +1093,36 @@ startxref
               )}
             </div>
 
-
             <button
               className="icon-btn"
               title="Enclave Notifications"
               onClick={() => setShowNotificationsModal(true)}
+              style={{ position: "relative" }}
             >
               🔔
+              {unreadAlerts.length > 0 && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: "-4px",
+                    right: "-4px",
+                    background: "#ef4444",
+                    color: "#ffffff",
+                    fontSize: "10px",
+                    fontWeight: "800",
+                    minWidth: "18px",
+                    height: "18px",
+                    borderRadius: "9px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: "0 4px",
+                    boxShadow: "0 0 10px rgba(239, 68, 68, 0.8)",
+                  }}
+                >
+                  {unreadAlerts.length}
+                </span>
+              )}
             </button>
             <button
               className="icon-btn"
@@ -1060,14 +1138,117 @@ startxref
               onClick={() => setShowProfileModal(true)}
               title="Click to view Officer Credentials"
             >
-              <div className="user-avatar">S</div>
+              <div className="user-avatar">{currentUser?.username?.[0]?.toUpperCase() || "H"}</div>
               <div className="user-info">
-                <span className="user-name">Sai</span>
-                <span className="user-role">Chief Analyst</span>
+                <span className="user-name">{currentUser?.name || currentUser?.username || "Head Operator"}</span>
+                <span className="user-role">{currentUser?.role === "head" ? "HEAD COMMANDER" : "RECIPIENT"}</span>
               </div>
             </div>
+
+            <button
+              className="card-badge"
+              style={{
+                background: "rgba(255, 255, 255, 0.08)",
+                color: "#cbd5e1",
+                cursor: "pointer",
+                padding: "6px 12px",
+                marginLeft: "4px",
+                fontSize: "11px",
+              }}
+              onClick={handleLogout}
+              title="Sign out of current enclave session"
+            >
+              Logout ⎋
+            </button>
           </div>
         </header>
+
+        {/* Live Enclave Screenshot Breach Alert Banner */}
+        {unreadAlerts.length > 0 && (
+          <div
+            style={{
+              margin: "16px 0 20px 0",
+              padding: "16px 20px",
+              background: "linear-gradient(135deg, rgba(185, 28, 28, 0.45) 0%, rgba(127, 29, 29, 0.25) 100%)",
+              border: "1.5px solid #ef4444",
+              borderRadius: "12px",
+              boxShadow: "0 0 30px rgba(239, 68, 68, 0.4)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: "14px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+              <div
+                style={{
+                  width: "44px",
+                  height: "44px",
+                  borderRadius: "10px",
+                  background: "rgba(239, 68, 68, 0.3)",
+                  border: "1px solid #ef4444",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "24px",
+                  flexShrink: 0,
+                }}
+              >
+                🚨
+              </div>
+              <div>
+                <div style={{ fontSize: "14px", fontWeight: "800", color: "#fca5a5", letterSpacing: "0.5px" }}>
+                  CRITICAL SECURITY ALERT: RECIPIENT SCREENSHOT ATTEMPT INTERCEPTED
+                </div>
+                <div style={{ fontSize: "12px", color: "#ffffff", marginTop: "3px" }}>
+                  <strong>Officer:</strong> {unreadAlerts[0].recipient_name} ({unreadAlerts[0].recipient_id}) •{" "}
+                  <strong>Incident:</strong> {unreadAlerts[0].reason} •{" "}
+                  <span style={{ color: "#fca5a5", fontFamily: "monospace" }}>
+                    {new Date(unreadAlerts[0].timestamp).toLocaleTimeString()}
+                  </span>
+                  {unreadAlerts.length > 1 && (
+                    <span style={{ marginLeft: "8px", background: "rgba(0,0,0,0.4)", padding: "2px 6px", borderRadius: "4px", fontSize: "11px" }}>
+                      +{unreadAlerts.length - 1} more violation(s)
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              <button
+                className="card-badge"
+                style={{
+                  background: "#ef4444",
+                  color: "#ffffff",
+                  cursor: "pointer",
+                  padding: "8px 16px",
+                  fontWeight: "700",
+                }}
+                onClick={() => dismissNotification(unreadAlerts[0].id)}
+              >
+                Dismiss Alert
+              </button>
+              <button
+                className="card-badge"
+                style={{
+                  background: "rgba(255, 255, 255, 0.15)",
+                  color: "#ffffff",
+                  cursor: "pointer",
+                  padding: "8px 16px",
+                  fontWeight: "600",
+                }}
+                onClick={() => {
+                  setActiveNav("ledger");
+                  setShowNotificationsModal(true);
+                }}
+              >
+                View Incident Ledger
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 3. Dashboard Overview */}
         {activeNav === "dashboard" && (
@@ -1210,178 +1391,84 @@ startxref
               </div>
 
               <div className="sample-docs-grid">
-                {/* 1. Alice Vance */}
-                <div className="sample-doc-card watermarked">
-                  <div className="sample-doc-header">
-                    <div>
-                      <div className="sample-doc-title">Alice Vance — Decrypted Copy</div>
-                      <div className="sample-doc-meta">Role: Chief Intelligence Officer</div>
+                {Object.keys(decryptedCopies).length === 0 ? (
+                  <div style={{ gridColumn: "1 / -1", padding: "28px", textAlign: "center", background: "rgba(255,255,255,0.02)", borderRadius: "10px", border: "1px dashed rgba(255,255,255,0.1)" }}>
+                    <div style={{ fontSize: "20px", marginBottom: "8px" }}>📄</div>
+                    <div style={{ color: "var(--text-primary)", fontSize: "13px", fontWeight: "600", marginBottom: "4px" }}>
+                      No Decrypted Dossiers in Active Session
                     </div>
-                    <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#cbd5e1" }}>
-                      Watermarked
-                    </span>
+                    <div style={{ color: "var(--text-muted)", fontSize: "12px" }}>
+                      Encrypt a document in Section 2 and decrypt it for enrolled officers in Section 3 to generate live watermarked forensic copies.
+                    </div>
                   </div>
-                  <p style={{ fontSize: "11.5px", color: "var(--text-secondary)", marginTop: "6px" }}>
-                    Invisibly watermarked with SHA-256 steganographic digest bound to Alice&apos;s keypair & session nonce.
-                  </p>
-                  <div className="sample-doc-actions">
-                    <button
-                      className="btn-sm-download"
-                      onClick={() => {
-                        const doc = sampleDocs.find((d) => d.recipient_id === "rec-alice-01");
-                        if (doc) downloadPdf(doc.pdf_base64, "1_Alice_Vance_Decrypted_Watermarked.pdf");
-                        else alert("Fetching Alice's document...");
-                      }}
-                    >
-                      ⬇ Download PDF
-                    </button>
-                    <button
-                      className="btn-sm-attribute"
-                      onClick={() => {
-                        const doc = sampleDocs.find((d) => d.recipient_id === "rec-alice-01");
-                        if (doc) {
-                          setLeakFileInput(null);
-                          handleAttribute(doc.pdf_base64, undefined, "Alice Vance's Watermarked Copy (rec-alice-01)");
-                        } else {
-                          alert("Document loading, please retry in a second.");
-                        }
-                      }}
-                    >
-                      🎯 Test in Leak Attribution
-                    </button>
-                  </div>
-                </div>
+                ) : (
+                  Object.entries(decryptedCopies).map(([rId, copy]) => {
+                    const officer = recipients.find((r) => r.recipient_id === rId);
+                    const officerName = officer?.name || rId;
+                    const officerRole = officer?.role || "Enrolled Officer";
+                    const filename = copy.original_filename || `${officerName}_watermarked.pdf`;
 
-                {/* 2. Bob Sterling */}
-                <div className="sample-doc-card watermarked">
-                  <div className="sample-doc-header">
-                    <div>
-                      <div className="sample-doc-title">Bob Sterling — Decrypted Copy</div>
-                      <div className="sample-doc-meta">Role: Senior Cryptanalyst</div>
-                    </div>
-                    <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#cbd5e1" }}>
-                      Watermarked
-                    </span>
-                  </div>
-                  <p style={{ fontSize: "11.5px", color: "var(--text-secondary)", marginTop: "6px" }}>
-                    Invisibly watermarked with SHA-256 steganographic digest bound to Bob&apos;s keypair & session nonce.
-                  </p>
-                  <div className="sample-doc-actions">
-                    <button
-                      className="btn-sm-download"
-                      onClick={() => {
-                        const doc = sampleDocs.find((d) => d.recipient_id === "rec-bob-02");
-                        if (doc) downloadPdf(doc.pdf_base64, "2_Bob_Sterling_Decrypted_Watermarked.pdf");
-                        else alert("Fetching Bob's document...");
-                      }}
-                    >
-                      ⬇ Download PDF
-                    </button>
-                    <button
-                      className="btn-sm-attribute"
-                      onClick={() => {
-                        const doc = sampleDocs.find((d) => d.recipient_id === "rec-bob-02");
-                        if (doc) {
-                          setLeakFileInput(null);
-                          handleAttribute(doc.pdf_base64, undefined, "Bob Sterling's Watermarked Copy (rec-bob-02)");
-                        } else {
-                          alert("Document loading, please retry in a second.");
-                        }
-                      }}
-                    >
-                      🎯 Test in Leak Attribution
-                    </button>
-                  </div>
-                </div>
-
-                {/* 3. Charlie Miller */}
-                <div className="sample-doc-card watermarked">
-                  <div className="sample-doc-header">
-                    <div>
-                      <div className="sample-doc-title">Charlie Miller — Decrypted Copy</div>
-                      <div className="sample-doc-meta">Role: Defense Logistics Attaché</div>
-                    </div>
-                    <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#cbd5e1" }}>
-                      Watermarked
-                    </span>
-                  </div>
-                  <p style={{ fontSize: "11.5px", color: "var(--text-secondary)", marginTop: "6px" }}>
-                    Invisibly watermarked with SHA-256 steganographic digest bound to Charlie&apos;s keypair & session nonce.
-                  </p>
-                  <div className="sample-doc-actions">
-                    <button
-                      className="btn-sm-download"
-                      onClick={() => {
-                        const doc = sampleDocs.find((d) => d.recipient_id === "rec-charlie-03");
-                        if (doc) downloadPdf(doc.pdf_base64, "3_Charlie_Miller_Decrypted_Watermarked.pdf");
-                        else alert("Fetching Charlie's document...");
-                      }}
-                    >
-                      ⬇ Download PDF
-                    </button>
-                    <button
-                      className="btn-sm-attribute"
-                      onClick={() => {
-                        const doc = sampleDocs.find((d) => d.recipient_id === "rec-charlie-03");
-                        if (doc) {
-                          setLeakFileInput(null);
-                          handleAttribute(doc.pdf_base64, undefined, "Charlie Miller's Watermarked Copy (rec-charlie-03)");
-                        } else {
-                          alert("Document loading, please retry in a second.");
-                        }
-                      }}
-                    >
-                      🎯 Test in Leak Attribution
-                    </button>
-                  </div>
-                </div>
-
-                {/* 4. Original Unwatermarked Briefing */}
-                <div className="sample-doc-card original">
-                  <div className="sample-doc-header">
-                    <div>
-                      <div className="sample-doc-title">Original Classified Briefing</div>
-                      <div className="sample-doc-meta">Master Source Document</div>
-                    </div>
-                    <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#94a3b8" }}>
-                      Unwatermarked
-                    </span>
-                  </div>
-                  <p style={{ fontSize: "11.5px", color: "var(--text-secondary)", marginTop: "6px" }}>
-                    Original classified dossier prior to recipient-specific decryption. Testing this confirms NO false positive.
-                  </p>
-                  <div className="sample-doc-actions">
-                    <button
-                      className="btn-sm-download"
-                      onClick={() => {
-                        const doc = sampleDocs.find((d) => d.filename === "sample_briefing.pdf");
-                        if (doc) downloadPdf(doc.pdf_base64, "0_Original_Unwatermarked_Classified_Briefing.pdf");
-                        else alert("Fetching original document...");
-                      }}
-                    >
-                      ⬇ Download PDF
-                    </button>
-                    <button
-                      className="btn-sm-attribute"
-                      style={{
-                        background: "rgba(255,255,255,0.08)",
-                        borderColor: "rgba(255,255,255,0.2)",
-                        color: "#ffffff",
-                      }}
-                      onClick={() => {
-                        const doc = sampleDocs.find((d) => d.filename === "sample_briefing.pdf");
-                        if (doc) {
-                          setLeakFileInput(null);
-                          handleAttribute(doc.pdf_base64, undefined, "Clean Master Dossier (Unwatermarked)");
-                        } else {
-                          alert("Document loading, please retry in a second.");
-                        }
-                      }}
-                    >
-                      🔍 Test Source (Unwatermarked)
-                    </button>
-                  </div>
-                </div>
+                    return (
+                      <div key={rId} className="sample-doc-card watermarked">
+                        <div className="sample-doc-header">
+                          <div>
+                            <div className="sample-doc-title">{officerName} — Decrypted Copy</div>
+                            <div className="sample-doc-meta">Role: {officerRole}</div>
+                          </div>
+                          <span className="card-badge" style={{ background: "rgba(255,255,255,0.08)", color: "#cbd5e1" }}>
+                            Watermarked
+                          </span>
+                        </div>
+                        <p style={{ fontSize: "11.5px", color: "var(--text-secondary)", marginTop: "6px" }}>
+                          Invisibly watermarked with SHA-256 steganographic digest bound to {officerName}&apos;s keypair &amp; session nonce.
+                        </p>
+                        <div className="sample-doc-actions">
+                          <button
+                            className="btn-sm-download"
+                            style={{ background: "rgba(255, 255, 255, 0.15)", color: "#ffffff", fontWeight: "700" }}
+                            title="Open in locked-down HTML5 canvas viewer with 2D DCT spread-spectrum watermarking"
+                            onClick={() => {
+                              setActiveSecureViewerCopy({
+                                recipientId: rId,
+                                recipientName: officerName,
+                                documentHash: copy.document_hash,
+                                pdfBase64: copy.watermarked_pdf_base64,
+                                title: `${officerName}'s Classified Intelligence Briefing`,
+                              });
+                            }}
+                          >
+                            🔒 Secure Viewer
+                          </button>
+                          <button
+                            className="btn-sm-download"
+                            onClick={() => {
+                              if (copy.watermarked_pdf_base64) {
+                                downloadPdf(copy.watermarked_pdf_base64, filename);
+                              } else {
+                                alert("Document data not available.");
+                              }
+                            }}
+                          >
+                            ⬇ Download PDF
+                          </button>
+                          <button
+                            className="btn-sm-attribute"
+                            onClick={() => {
+                              if (copy.watermarked_pdf_base64) {
+                                setLeakFileInput(null);
+                                handleAttribute(copy.watermarked_pdf_base64, undefined, `${officerName}'s Watermarked Copy (${rId})`);
+                              } else {
+                                alert("Document data not available.");
+                              }
+                            }}
+                          >
+                            🎯 Test in Leak Attribution
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
               </div>
             </section>
 
@@ -1443,139 +1530,960 @@ startxref
               </section>
             )}
 
-            {/* Bottom Wide Panel: Portfolio Performance & Hash-Chained Ledger */}
-            <section className="nayanx-card col-12" style={{ marginTop: "20px" }}>
-              <div className="chart-header-row">
-                <div>
-                  <span className="card-title" style={{ fontSize: "15px", color: "var(--text-primary)" }}>
-                    Ledger Provenance & Cryptographic Anchor Timeline
-                  </span>
-                  <div style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "2px" }}>
-                    Continuous tamper-evident Merkle verification across all decryption events
-                  </div>
+            {/* Bottom Wide Panel: Architecture & Cryptographic Flowchart */}
+            {(() => {
+              const flowchartLayers = [
+                {
+                  id: 1,
+                  name: "PQC Encapsulation",
+                  standard: "NIST FIPS 203 (ML-KEM-768) + AES-256-GCM (NIST SP 800-38D)",
+                  shortTech: "FIPS 203 Lattice KEM",
+                  title: "Post-Quantum Encapsulation & Bulk Encryption",
+                  subtitle: "How raw classified intelligence is sealed so only designated key holders can ever read it, protected against future quantum attacks.",
+                  icon: "🛡️",
+                  input: {
+                    label: "INPUT DATA (Into this Layer)",
+                    items: [
+                      "Original classified PDF document (raw in-memory bytes)",
+                      "Target officers' ML-KEM-768 public keys (from software vault)"
+                    ],
+                    sourceTag: "Client Ingestion & Enclave Vault"
+                  },
+                  steps: [
+                    {
+                      number: "01",
+                      name: "Document Ingestion & Hash Anchoring",
+                      description: "The raw PDF is ingested in memory and hashed (SHA-256) to establish the immutable document root hash (doc_hash).",
+                      techTag: "SHA-256 Root Hash"
+                    },
+                    {
+                      number: "02",
+                      name: "Symmetric Bulk Encryption",
+                      description: "A cryptographically strong 256-bit Document Encryption Key (DEK) is generated to encrypt the file via AES-256-GCM.",
+                      techTag: "AES-256-GCM (256-bit DEK)"
+                    },
+                    {
+                      number: "03",
+                      name: "Post-Quantum KEM Encapsulation",
+                      description: "For each enrolled officer, their ML-KEM-768 public key is retrieved from the software vault registry.",
+                      techTag: "FIPS 203 Vault Lookup"
+                    },
+                    {
+                      number: "04",
+                      name: "Independent Shared Secrets",
+                      description: "ML-KEM-768 encapsulates the 256-bit DEK separately for each recipient into a compact 1,088-byte lattice ciphertext.",
+                      techTag: "Lattice Ring: q=3329, k=3"
+                    },
+                    {
+                      number: "05",
+                      name: "Broadcast Distribution Package",
+                      description: "The single AES ciphertext and per-officer KEM ciphertexts are packaged into an encrypted bundle.",
+                      techTag: "Atomic Encrypted Package"
+                    }
+                  ],
+                  output: {
+                    label: "OUTPUT ARTIFACT (Passed to Next Layer)",
+                    items: [
+                      "AES-256-GCM encrypted document payload",
+                      "Array of recipient-specific ML-KEM-768 wrapped keys"
+                    ],
+                    nextLayerTarget: "Layer 2: Stego Watermarking & Decapsulation",
+                    nextLayerId: 2
+                  },
+                  securityGuarantee: {
+                    title: "Post-Quantum Forward Secrecy",
+                    description: "Attackers harvesting encrypted files today cannot decrypt them even with future quantum computers (Harvest Now, Decrypt Later resilience)."
+                  },
+                  primitives: [
+                    { name: "ML-KEM-768", spec: "NIST FIPS 203 (Module-Lattice KEM)" },
+                    { name: "AES-256-GCM", spec: "NIST SP 800-38D Authenticated AEAD" },
+                    { name: "SHA-256", spec: "FIPS 180-4 Canonical Document Digest" }
+                  ],
+                  invariants: [
+                    "Zero unencrypted plaintext written to disk",
+                    "NIST Security Category 3 (192-bit quantum security)",
+                    "Independent lattice ciphertext per recipient"
+                  ]
+                },
+                {
+                  id: 2,
+                  name: "Stego Watermarking",
+                  standard: "HMAC-SHA256 + Zero-Width Unicode & Structural Trailer Anchors",
+                  shortTech: "HMAC-SHA256 Stego",
+                  title: "Steganographic Watermarking & Decapsulation",
+                  subtitle: "How authorized officers decrypt their copy while an imperceptible, cryptographically tied watermark is permanently embedded.",
+                  icon: "💧",
+                  input: {
+                    label: "INPUT DATA (Into this Layer)",
+                    items: [
+                      "AES-256-GCM encrypted document bundle",
+                      "Recipient officer's ML-KEM-768 private key"
+                    ],
+                    sourceTag: "From Layer 1 Output + Officer Vault"
+                  },
+                  steps: [
+                    {
+                      number: "01",
+                      name: "Lattice Decapsulation",
+                      description: "Recipient's ML-KEM-768 private key decapsulates their specific KEM ciphertext, recovering the shared 256-bit AES DEK.",
+                      techTag: "ML-KEM-768 Decapsulation"
+                    },
+                    {
+                      number: "02",
+                      name: "In-Memory Bulk Decryption",
+                      description: "Recovers the original PDF byte stream directly into an isolated memory buffer using AES-256-GCM without writing to persistent disk.",
+                      techTag: "AES-256-GCM AEAD Tag Verify"
+                    },
+                    {
+                      number: "03",
+                      name: "Forensic Fingerprint Derivation",
+                      description: "Computes a unique HMAC-SHA256 digest binding recipient_id, cryptographic nonce, timestamp, and doc_hash.",
+                      techTag: "HMAC-SHA256(rec_id || nonce || time || doc_hash)"
+                    },
+                    {
+                      number: "04",
+                      name: "Invisible Steganographic Anchor",
+                      description: "Injects the cryptographic fingerprint invisibly into PDF text streams (zero-width Unicode) and XMP metadata trailers.",
+                      techTag: "Zero-Width Unicode U+200B/C/D"
+                    },
+                    {
+                      number: "05",
+                      name: "Personalized Forensic Export",
+                      description: "Outputs a personalized PDF identical to the naked eye but permanently and forensically attributed to that officer.",
+                      techTag: "Personalized Forensic Copy"
+                    }
+                  ],
+                  output: {
+                    label: "OUTPUT ARTIFACT (Passed to Next Layer)",
+                    items: [
+                      "Personalized watermarked PDF copy for officer",
+                      "Cryptographic audit event record (watermark hash + recipient ID)"
+                    ],
+                    nextLayerTarget: "Layer 3: Merkle Audit Ledger Commitment",
+                    nextLayerId: 3
+                  },
+                  securityGuarantee: {
+                    title: "Steganographic Non-Destructive Binding",
+                    description: "The watermark survives re-compression, printing, screenshots, and file renaming without visual degradation, provably bound to the recipient."
+                  },
+                  primitives: [
+                    { name: "ML-KEM-768 Decaps", spec: "FIPS 203 Lattice Secret Recovery" },
+                    { name: "HMAC-SHA256", spec: "RFC 2104 Forensic Watermark Keying" },
+                    { name: "Zero-Width Stego", spec: "Unicode U+200B/C/D Structural Injection" }
+                  ],
+                  invariants: [
+                    "Watermark computationally unforgeable without HMAC secret",
+                    "100% imperceptible to human readers (zero visual disruption)",
+                    "Simultaneous dispatch to append-only audit trail"
+                  ]
+                },
+                {
+                  id: 3,
+                  name: "Merkle Audit Ledger",
+                  standard: "NIST FIPS 204 (ML-DSA-65) + Merkle SHA-256 Chaining (SQLite)",
+                  shortTech: "FIPS 204 Dual Sigs",
+                  title: "Merkle Audit Ledger & Quantum Signatures",
+                  subtitle: "How every document access is committed to a tamper-evident cryptographic ledger with dual post-quantum digital signatures.",
+                  icon: "⛓️",
+                  input: {
+                    label: "INPUT DATA (Into this Layer)",
+                    items: [
+                      "Audit event metadata (doc_hash, watermark_hash, recipient_id, timestamp)",
+                      "Recipient & Authority ML-DSA-65 keypairs"
+                    ],
+                    sourceTag: "From Layer 2 Audit Event + Key Vault"
+                  },
+                  steps: [
+                    {
+                      number: "01",
+                      name: "Canonical Record Serialization",
+                      description: "The access event is normalized into deterministic RFC-8785 JSON format (index, timestamp, document hash, watermark hash).",
+                      techTag: "RFC-8785 Canonical JSON"
+                    },
+                    {
+                      number: "02",
+                      name: "Recipient ML-DSA-65 Signature",
+                      description: "The accessing officer's private key signs the canonical record, creating mathematical non-repudiation proof of receipt.",
+                      techTag: "FIPS 204 ML-DSA-65 Recipient Sig"
+                    },
+                    {
+                      number: "03",
+                      name: "Authority Counter-Signature",
+                      description: "The WebEye Master Enclave signs the record with its authority ML-DSA-65 key, confirming timestamp and enclave compliance.",
+                      techTag: "Master Enclave Counter-Signature"
+                    },
+                    {
+                      number: "04",
+                      name: "Parent Hash Chaining",
+                      description: "Computes block hash SHA256(index + prev_block_hash + canonical_record + dual_signatures), linking to the prior block.",
+                      techTag: "SHA-256 Parent Hash Linkage"
+                    },
+                    {
+                      number: "05",
+                      name: "Immutable Ledger Commitment",
+                      description: "Appends the verified block to the persistent ledger database with automatic Merkle leaf verification.",
+                      techTag: "SQLite Append-Only Block Commit"
+                    }
+                  ],
+                  output: {
+                    label: "OUTPUT ARTIFACT (Passed to Next Layer)",
+                    items: [
+                      "Committed ledger block with dual ML-DSA-65 signatures",
+                      "Cryptographic Merkle inclusion proof"
+                    ],
+                    nextLayerTarget: "Layer 4: Forensic Attribution & Court Admissibility",
+                    nextLayerId: 4
+                  },
+                  securityGuarantee: {
+                    title: "Cryptographic Non-Repudiation & Tamper Rejection",
+                    description: "Any retroactive ledger modification or file alteration immediately invalidates the parent hash chain and is rejected by the Merkle verifier."
+                  },
+                  primitives: [
+                    { name: "ML-DSA-65", spec: "NIST FIPS 204 Digital Signature Algorithm" },
+                    { name: "RFC-8785", spec: "Deterministic JSON Canonicalization (JCS)" },
+                    { name: "Merkle Chaining", spec: "SHA-256 Parent Hash Append-Only Tree" }
+                  ],
+                  invariants: [
+                    "Dual-key authorization (recipient cannot repudiate access)",
+                    "Strict monotonic block indexing with unbroken parent hashes",
+                    "Quantum-resistant lattice digital signatures"
+                  ]
+                },
+                {
+                  id: 4,
+                  name: "Forensic Attribution",
+                  standard: "Section 65B(4) Indian Evidence Act / BSA 2023 + 6-Point Cryptographic Audit",
+                  shortTech: "Sec. 65B(4) Legal Engine",
+                  title: "Forensic Leak Attribution & Court Admissibility",
+                  subtitle: "How leaked classified documents are ingested, analyzed, and traced to the exact source with legally binding courtroom evidence.",
+                  icon: "🎯",
+                  input: {
+                    label: "INPUT DATA (Into this Layer)",
+                    items: [
+                      "Exfiltrated / leaked PDF document (or digital copy)",
+                      "Current Merkle ledger state head from SQLite"
+                    ],
+                    sourceTag: "Evidence Intake & Merkle Head"
+                  },
+                  steps: [
+                    {
+                      number: "01",
+                      name: "Stego Forensic Extraction",
+                      description: "Deep-scans the leaked document structure to isolate invisible zero-width anchors and XMP trailer digests.",
+                      techTag: "Zero-Width Unicode Scanner"
+                    },
+                    {
+                      number: "02",
+                      name: "Ledger Provenance Correlation",
+                      description: "Queries the Merkle audit ledger to match the extracted watermark hash against historical access records.",
+                      techTag: "Merkle Ledger Query"
+                    },
+                    {
+                      number: "03",
+                      name: "6-Point Cryptographic Audit",
+                      description: "Validates: 1. Watermark commitment, 2. HMAC validity, 3. Officer ML-DSA-65 sig, 4. Authority sig, 5. Chain integrity, 6. Tamper check.",
+                      techTag: "6-Point Forensic Engine"
+                    },
+                    {
+                      number: "04",
+                      name: "Culprit Attribution Determination",
+                      description: "Pinpoints the exact officer identity, clearance level, access timestamp, and issuing workstation with mathematical certainty.",
+                      techTag: "Identified Leaker Record"
+                    },
+                    {
+                      number: "05",
+                      name: "Section 65B(4) Certificate Generation",
+                      description: "Automatically synthesizes a certified forensic audit report compliant with digital evidence requirements for court prosecution.",
+                      techTag: "Legally Admissible Court PDF"
+                    }
+                  ],
+                  output: {
+                    label: "OUTPUT ARTIFACT (Delivered to Legal Authorities)",
+                    items: [
+                      "Attributed culprit dossier (officer identity + clearance level + timestamp)",
+                      "Signed Section 65B(4) court evidence certificate PDF"
+                    ],
+                    nextLayerTarget: "Military Tribunal / Internal Affairs / Court of Law",
+                    nextLayerId: undefined
+                  },
+                  securityGuarantee: {
+                    title: "100% Mathematical Certainty in Court",
+                    description: "Zero false-positive rate. Dual post-quantum signatures and Merkle proof provide unimpeachable attribution under Section 65B(4)."
+                  },
+                  primitives: [
+                    { name: "Forensic Steganalysis", spec: "Zero-Width & XMP Trailer Parser" },
+                    { name: "6-Point Verifier", spec: "Dual ML-DSA-65 + SHA-256 Merkle Engine" },
+                    { name: "Sec 65B(4) Synthesizer", spec: "Automated Digital Evidence Certificate" }
+                  ],
+                  invariants: [
+                    "Deterministic attribution with 100% mathematical certainty",
+                    "Full provenance chain verifiable offline without internet",
+                    "Compliant with Indian Evidence Act 65B & Bharatiya Sakshya Adhiniyam"
+                  ]
+                }
+              ];
+
+              const curLayer = flowchartLayers.find((l) => l.id === activeFlowchartLayer) || flowchartLayers[0];
+
+              // Clean SVG Flow Arrow Down Component
+              const FlowArrowDown = ({ label }: { label?: string }) => (
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyItems: "center", margin: "4px 0" }}>
+                  <svg width="24" height="26" viewBox="0 0 24 26" fill="none">
+                    <line x1="12" y1="0" x2="12" y2="18" stroke="rgba(255, 255, 255, 0.4)" strokeWidth="2" strokeDasharray="3 3" />
+                    <polygon points="7,16 12,24 17,16" fill="#ffffff" />
+                  </svg>
+                  {label && (
+                    <span style={{ fontSize: "10px", color: "var(--text-muted)", marginTop: "-2px" }}>{label}</span>
+                  )}
                 </div>
+              );
 
-                <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-                  {/* Interactive Period Filter Pills */}
-                  <div className="chart-pills">
-                    {["1D", "1W", "1M", "6M", "1Y"].map((period) => (
-                      <button
-                        key={period}
-                        className={`chart-pill-btn ${selectedPeriod === period ? "active" : ""}`}
-                        onClick={() => setSelectedPeriod(period)}
-                      >
-                        {period}
-                      </button>
-                    ))}
-                  </div>
-
-                  <button
-                    className="card-badge"
-                    onClick={handleTamperSimulation}
-                    style={{ background: "rgba(255, 255, 255, 0.06)", color: "#cbd5e1", cursor: "pointer" }}
-                    title="Simulate adversarial attack on SQLite block to prove ledger detects tampering"
-                  >
-                    Simulate Tamper
-                  </button>
-
-                  <button
-                    className="card-badge"
-                    onClick={handleRestoreLedger}
-                    style={{ background: "rgba(255, 255, 255, 0.12)", color: "#ffffff", cursor: "pointer" }}
-                    title="Restore any tampered blocks to original state"
-                  >
-                    Restore Ledger
-                  </button>
-                </div>
-              </div>
-
-              {tamperMessage && (
-                <div className="verdict-banner danger" style={{ margin: "16px 0" }}>
-                  <div className="verdict-icon">⚠️</div>
-                  <div
-                    className="verdict-details"
-                    style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                  >
+              return (
+                <section className="nayanx-card col-12" style={{ marginTop: "20px" }}>
+                  {/* Flowchart Card Header */}
+                  <div className="chart-header-row" style={{ marginBottom: "16px" }}>
                     <div>
-                      <h4>Tamper Simulation Active</h4>
-                      <p>{tamperMessage}</p>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        <span className="card-badge" style={{ background: "rgba(255,255,255,0.12)", color: "#ffffff", fontWeight: "700" }}>
+                          FLOWCHART ARCHITECTURE
+                        </span>
+                        <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                          4 Sequential Cryptographic Protection Layers
+                        </span>
+                      </div>
+                      <span className="card-title" style={{ fontSize: "16px", color: "var(--text-primary)", marginTop: "4px", display: "block" }}>
+                        WebEye End-to-End Cryptographic Execution Flowchart
+                      </span>
+                      <div style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "2px" }}>
+                        Sequential dataflow diagram explaining how documents pass through post-quantum encapsulation, invisible steganography, Merkle ledger commitment, and forensic attribution.
+                      </div>
                     </div>
-                    <button
-                      className="card-badge"
-                      style={{
-                        background: "#ffffff",
-                        color: "#0a0c10",
-                        cursor: "pointer",
-                        padding: "6px 14px",
-                        fontWeight: "700",
-                      }}
-                      onClick={handleRestoreLedger}
-                    >
-                      Heal & Restore Chain Now
-                    </button>
+
+                    <div style={{ display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }}>
+                      {/* View Mode Toggle */}
+                      <div style={{ display: "flex", background: "rgba(255,255,255,0.04)", borderRadius: "6px", padding: "2px", border: "1px solid rgba(255,255,255,0.08)" }}>
+                        <button
+                          onClick={() => setFlowchartViewMode("detailed")}
+                          style={{
+                            background: flowchartViewMode === "detailed" ? "rgba(255,255,255,0.15)" : "transparent",
+                            color: flowchartViewMode === "detailed" ? "#ffffff" : "var(--text-muted)",
+                            border: "none",
+                            borderRadius: "4px",
+                            padding: "4px 10px",
+                            fontSize: "11px",
+                            fontWeight: "600",
+                            cursor: "pointer",
+                          }}
+                        >
+                          📌 Detailed Flowchart
+                        </button>
+                        <button
+                          onClick={() => setFlowchartViewMode("overview")}
+                          style={{
+                            background: flowchartViewMode === "overview" ? "rgba(255,255,255,0.15)" : "transparent",
+                            color: flowchartViewMode === "overview" ? "#ffffff" : "var(--text-muted)",
+                            border: "none",
+                            borderRadius: "4px",
+                            padding: "4px 10px",
+                            fontSize: "11px",
+                            fontWeight: "600",
+                            cursor: "pointer",
+                          }}
+                        >
+                          🔲 4-Layer Matrix
+                        </button>
+                      </div>
+
+                      <button
+                        className="card-badge"
+                        onClick={handleTamperSimulation}
+                        style={{ background: "rgba(255, 255, 255, 0.06)", color: "#cbd5e1", cursor: "pointer" }}
+                        title="Simulate adversarial attack on SQLite block to prove ledger detects tampering"
+                      >
+                        Simulate Ledger Tamper
+                      </button>
+
+                      <button
+                        className="card-badge"
+                        onClick={handleRestoreLedger}
+                        style={{ background: "rgba(255, 255, 255, 0.12)", color: "#ffffff", cursor: "pointer" }}
+                        title="Restore any tampered blocks to original state"
+                      >
+                        Restore Ledger
+                      </button>
+                    </div>
                   </div>
-                </div>
-              )}
 
-              {/* Glowing Wave SVG Line Chart */}
-              <div className="chart-svg-container">
-                <svg className="chart-svg" viewBox="0 0 1000 120" preserveAspectRatio="none">
-                  <defs>
-                    <linearGradient id="chartGradient" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#ffffff" stopOpacity="0.22" />
-                      <stop offset="100%" stopColor="#ffffff" stopOpacity="0.0" />
-                    </linearGradient>
-                  </defs>
-                  <path
-                    d={
-                      selectedPeriod === "1D"
-                        ? "M 0,100 Q 250,80 500,40 T 1000,30 L 1000,120 L 0,120 Z"
-                        : selectedPeriod === "1W"
-                        ? "M 0,90 Q 200,60 400,30 T 800,50 L 1000,40 L 1000,120 L 0,120 Z"
-                        : "M 0,90 Q 150,20 300,50 T 600,30 T 750,75 T 900,40 L 1000,50 L 1000,120 L 0,120 Z"
-                    }
-                    fill="url(#chartGradient)"
-                  />
-                  <path
-                    d={
-                      selectedPeriod === "1D"
-                        ? "M 0,100 Q 250,80 500,40 T 1000,30"
-                        : selectedPeriod === "1W"
-                        ? "M 0,90 Q 200,60 400,30 T 800,50 L 1000,40"
-                        : "M 0,90 Q 150,20 300,50 T 600,30 T 750,75 T 900,40 L 1000,50"
-                    }
-                    fill="none"
-                    stroke="#ffffff"
-                    strokeWidth="2"
-                  />
-                  <circle cx="750" cy="75" r="4.5" fill="#ffffff" filter="drop-shadow(0 0 6px rgba(255,255,255,0.7))" />
-                  <line x1="750" y1="75" x2="750" y2="120" stroke="#ffffff" strokeDasharray="3,3" opacity="0.35" />
-                </svg>
-              </div>
+                  {tamperMessage && (
+                    <div className="verdict-banner danger" style={{ margin: "16px 0" }}>
+                      <div className="verdict-icon">⚠️</div>
+                      <div
+                        className="verdict-details"
+                        style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                      >
+                        <div>
+                          <h4>Tamper Simulation Active</h4>
+                          <p>{tamperMessage}</p>
+                        </div>
+                        <button
+                          className="card-badge"
+                          style={{
+                            background: "#ffffff",
+                            color: "#0a0c10",
+                            cursor: "pointer",
+                            padding: "6px 14px",
+                            fontWeight: "700",
+                          }}
+                          onClick={handleRestoreLedger}
+                        >
+                          Heal &amp; Restore Chain Now
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginTop: "12px",
-                  fontSize: "11px",
-                  color: "var(--text-muted)",
-                }}
-              >
-                <span>Jan</span>
-                <span>Feb</span>
-                <span>Mar</span>
-                <span>Apr</span>
-                <span>May</span>
-                <span style={{ color: "#ffffff", fontWeight: "700" }}>Jun (Audit Anchor)</span>
-                <span>Jul</span>
-                <span>Aug</span>
-                <span>Sep</span>
-                <span>Oct</span>
-                <span>Nov</span>
-                <span>Dec</span>
-              </div>
-            </section>
+                  {/* MACRO PIPELINE RIBBON: CONNECTS ALL 4 LAYERS WITH DIRECTIONAL ARROWS */}
+                  <div
+                    style={{
+                      background: "rgba(10, 12, 16, 0.65)",
+                      border: "1px solid rgba(255, 255, 255, 0.08)",
+                      borderRadius: "10px",
+                      padding: "12px 14px",
+                      marginBottom: "16px",
+                      backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.04) 1px, transparent 1px)",
+                      backgroundSize: "20px 20px",
+                    }}
+                  >
+                    <div style={{ fontSize: "11px", fontWeight: "700", color: "var(--text-muted)", marginBottom: "8px", letterSpacing: "0.5px" }}>
+                      MACRO PIPELINE FLOW (CLICK ANY LAYER TO INSPECT STEP-BY-STEP FLOWCHART):
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", overflowX: "auto", paddingBottom: "4px" }}>
+                      {flowchartLayers.map((layer, idx) => (
+                        <React.Fragment key={layer.id}>
+                          <button
+                            onClick={() => setActiveFlowchartLayer(layer.id)}
+                            style={{
+                              flex: "1 1 200px",
+                              minWidth: "190px",
+                              background: activeFlowchartLayer === layer.id ? "rgba(255, 255, 255, 0.12)" : "rgba(255, 255, 255, 0.025)",
+                              border: activeFlowchartLayer === layer.id ? "1.5px solid #ffffff" : "1px solid rgba(255, 255, 255, 0.1)",
+                              borderRadius: "8px",
+                              padding: "10px 12px",
+                              cursor: "pointer",
+                              textAlign: "left",
+                              transition: "all 0.15s ease",
+                              boxShadow: activeFlowchartLayer === layer.id ? "0 0 16px rgba(255, 255, 255, 0.08)" : "none",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                              <span style={{ fontSize: "10px", fontWeight: "800", color: activeFlowchartLayer === layer.id ? "#ffffff" : "var(--text-muted)", letterSpacing: "0.5px" }}>
+                                LAYER {layer.id}
+                              </span>
+                              <span className="card-badge" style={{ fontSize: "9px", padding: "1px 5px", background: activeFlowchartLayer === layer.id ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.05)" }}>
+                                {layer.shortTech}
+                              </span>
+                            </div>
+                            <div style={{ fontSize: "12.5px", fontWeight: "700", color: activeFlowchartLayer === layer.id ? "#ffffff" : "var(--text-secondary)", display: "flex", alignItems: "center", gap: "6px" }}>
+                              <span>{layer.icon}</span>
+                              <span>{layer.name}</span>
+                            </div>
+                          </button>
+
+                          {idx < flowchartLayers.length - 1 && (
+                            <div style={{ display: "flex", alignItems: "center", color: "rgba(255, 255, 255, 0.4)", flexShrink: 0 }} title="Cryptographic Data Conduit">
+                              <svg width="28" height="18" viewBox="0 0 28 18" fill="none">
+                                <line x1="0" y1="9" x2="20" y2="9" stroke="rgba(255, 255, 255, 0.35)" strokeWidth="2" strokeDasharray="3 3" />
+                                <polygon points="19,4 27,9 19,14" fill="rgba(255, 255, 255, 0.75)" />
+                              </svg>
+                            </div>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* FLOWCHART VIEW 1: DETAILED SEQUENTIAL STEP FLOWCHART (DEFAULT) */}
+                  {flowchartViewMode === "detailed" ? (
+                    <div
+                      style={{
+                        background: "rgba(10, 12, 16, 0.65)",
+                        border: "1px solid rgba(255, 255, 255, 0.08)",
+                        borderRadius: "12px",
+                        padding: "20px 18px",
+                        backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.035) 1px, transparent 1px)",
+                        backgroundSize: "22px 22px",
+                      }}
+                    >
+                      {/* Active Layer Header Bar */}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px", marginBottom: "20px", paddingBottom: "14px", borderBottom: "1px solid rgba(255, 255, 255, 0.08)" }}>
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" }}>
+                            <span style={{ fontSize: "11px", fontWeight: "800", color: "#ffffff", background: "rgba(255, 255, 255, 0.12)", padding: "3px 8px", borderRadius: "4px", letterSpacing: "0.5px" }}>
+                              LAYER {curLayer.id} OF 4
+                            </span>
+                            <span className="card-badge" style={{ fontSize: "10px", padding: "2px 7px" }}>
+                              {curLayer.standard}
+                            </span>
+                          </div>
+                          <h3 style={{ fontSize: "18px", fontWeight: "700", color: "#ffffff", margin: "6px 0 2px 0", display: "flex", alignItems: "center", gap: "8px" }}>
+                            <span>{curLayer.icon}</span>
+                            <span>{curLayer.title}</span>
+                          </h3>
+                          <p style={{ fontSize: "12.5px", color: "var(--text-secondary)", margin: 0 }}>
+                            {curLayer.subtitle}
+                          </p>
+                        </div>
+
+                        {/* Layer Switcher Buttons */}
+                        <div style={{ display: "flex", gap: "6px" }}>
+                          {flowchartLayers.map((l) => (
+                            <button
+                              key={l.id}
+                              onClick={() => setActiveFlowchartLayer(l.id)}
+                              className="card-badge"
+                              style={{
+                                background: activeFlowchartLayer === l.id ? "#ffffff" : "rgba(255, 255, 255, 0.05)",
+                                color: activeFlowchartLayer === l.id ? "#0a0c10" : "var(--text-secondary)",
+                                cursor: "pointer",
+                                padding: "6px 12px",
+                                fontWeight: activeFlowchartLayer === l.id ? "700" : "500",
+                                transition: "all 0.15s ease",
+                              }}
+                            >
+                              Layer {l.id}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* 2-Column Responsive Layout: Flowchart on Left, Specs on Right */}
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+                          gap: "22px",
+                          alignItems: "start",
+                        }}
+                      >
+                        {/* LEFT COLUMN: THE STEP-BY-STEP FLOWCHART WITH ARROWS */}
+                        <div>
+                          <div style={{ fontSize: "12px", fontWeight: "800", color: "#ffffff", letterSpacing: "0.5px", marginBottom: "12px", display: "flex", alignItems: "center", gap: "6px" }}>
+                            <span>⚙️</span>
+                            <span>EXECUTION FLOWCHART: STEP-BY-STEP TECHNICAL PROCESS</span>
+                          </div>
+
+                          {/* 1. INPUT NODE */}
+                          <div
+                            style={{
+                              background: "rgba(255, 255, 255, 0.03)",
+                              border: "1.5px dashed rgba(255, 255, 255, 0.22)",
+                              borderRadius: "10px",
+                              padding: "12px 14px",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                              <span style={{ fontSize: "11px", fontWeight: "800", color: "#ffffff", display: "flex", alignItems: "center", gap: "6px" }}>
+                                <span>📥</span>
+                                <span>{curLayer.input.label}</span>
+                              </span>
+                              <span className="card-badge" style={{ fontSize: "9.5px", padding: "1px 6px" }}>
+                                {curLayer.input.sourceTag}
+                              </span>
+                            </div>
+                            <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "12px", color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: "3px" }}>
+                              {curLayer.input.items.map((it, idx) => (
+                                <li key={idx}><code style={{ color: "#ffffff", background: "rgba(255,255,255,0.06)", padding: "1px 4px", borderRadius: "3px" }}>{it}</code></li>
+                              ))}
+                            </ul>
+                          </div>
+
+                          {/* Flow Arrow pointing to Step 1 */}
+                          <FlowArrowDown label="Inflow" />
+
+                          {/* 2. THE 5 PROCESS STEPS WITH DOWNWARD ARROWS */}
+                          {curLayer.steps.map((step, idx) => (
+                            <React.Fragment key={step.number}>
+                              <div
+                                style={{
+                                  background: "rgba(255, 255, 255, 0.035)",
+                                  border: "1px solid rgba(255, 255, 255, 0.12)",
+                                  borderRadius: "8px",
+                                  padding: "10px 14px",
+                                  display: "flex",
+                                  alignItems: "flex-start",
+                                  gap: "12px",
+                                  transition: "border-color 0.2s ease",
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    background: "rgba(255, 255, 255, 0.1)",
+                                    color: "#ffffff",
+                                    fontWeight: "800",
+                                    fontSize: "11px",
+                                    padding: "4px 8px",
+                                    borderRadius: "5px",
+                                    flexShrink: 0,
+                                    letterSpacing: "0.5px",
+                                  }}
+                                >
+                                  {step.number}
+                                </div>
+                                <div style={{ flex: 1 }}>
+                                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "3px", flexWrap: "wrap", gap: "6px" }}>
+                                    <span style={{ fontSize: "13px", fontWeight: "700", color: "#ffffff" }}>
+                                      {step.name}
+                                    </span>
+                                    {step.techTag && (
+                                      <span style={{ fontSize: "10px", color: "var(--text-muted)", background: "rgba(255,255,255,0.05)", padding: "1px 6px", borderRadius: "3px" }}>
+                                        {step.techTag}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <p style={{ margin: 0, fontSize: "12px", color: "var(--text-secondary)", lineHeight: "1.45" }}>
+                                    {step.description}
+                                  </p>
+                                </div>
+                              </div>
+
+                              {/* Arrow pointing down to next step or output */}
+                              {idx < curLayer.steps.length - 1 ? (
+                                <FlowArrowDown />
+                              ) : (
+                                <FlowArrowDown label="Outflow" />
+                              )}
+                            </React.Fragment>
+                          ))}
+
+                          {/* 3. OUTPUT NODE */}
+                          <div
+                            style={{
+                              background: "rgba(255, 255, 255, 0.04)",
+                              border: "1.5px solid rgba(255, 255, 255, 0.25)",
+                              borderRadius: "10px",
+                              padding: "12px 14px",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                              <span style={{ fontSize: "11px", fontWeight: "800", color: "#ffffff", display: "flex", alignItems: "center", gap: "6px" }}>
+                                <span>📤</span>
+                                <span>{curLayer.output.label}</span>
+                              </span>
+                              <span className="card-badge" style={{ fontSize: "9.5px", padding: "1px 6px", background: "rgba(255, 255, 255, 0.15)", color: "#ffffff" }}>
+                                Produced Artifact
+                              </span>
+                            </div>
+                            <ul style={{ margin: 0, paddingLeft: "18px", fontSize: "12px", color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: "3px" }}>
+                              {curLayer.output.items.map((it, idx) => (
+                                <li key={idx}><strong style={{ color: "#ffffff" }}>{it}</strong></li>
+                              ))}
+                            </ul>
+                          </div>
+
+                          {/* 4. CONDUIT TO NEXT LAYER OR LEGAL TERMINAL */}
+                          <div style={{ marginTop: "12px", display: "flex", justifyContent: "center" }}>
+                            {curLayer.output.nextLayerId ? (
+                              <button
+                                onClick={() => setActiveFlowchartLayer(curLayer.output.nextLayerId!)}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "8px",
+                                  background: "rgba(255, 255, 255, 0.06)",
+                                  border: "1px solid rgba(255, 255, 255, 0.2)",
+                                  borderRadius: "8px",
+                                  padding: "8px 16px",
+                                  color: "#ffffff",
+                                  fontSize: "12px",
+                                  fontWeight: "600",
+                                  cursor: "pointer",
+                                  transition: "all 0.15s ease",
+                                }}
+                              >
+                                <span>Pipeline Conduit: Advance to {curLayer.output.nextLayerTarget}</span>
+                                <span>──►</span>
+                              </button>
+                            ) : (
+                              <div
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "8px",
+                                  background: "rgba(255, 255, 255, 0.08)",
+                                  border: "1px solid rgba(255, 255, 255, 0.25)",
+                                  borderRadius: "8px",
+                                  padding: "8px 16px",
+                                  color: "#ffffff",
+                                  fontSize: "12px",
+                                  fontWeight: "700",
+                                }}
+                              >
+                                <span>⚖️ Legal Terminal: Section 65B(4) Admissible in Court / Prosecution</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* RIGHT COLUMN: SECURITY GUARANTEE & SPECIFICATIONS RAIL */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+                          {/* 1. Security Guarantee Box */}
+                          <div
+                            style={{
+                              background: "rgba(255, 255, 255, 0.03)",
+                              border: "1px solid rgba(255, 255, 255, 0.15)",
+                              borderRadius: "10px",
+                              padding: "16px 14px",
+                            }}
+                          >
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+                              <span style={{ fontSize: "16px" }}>🛡️</span>
+                              <span style={{ fontSize: "12px", fontWeight: "800", color: "#ffffff", letterSpacing: "0.5px" }}>
+                                SECURITY GUARANTEE
+                              </span>
+                            </div>
+                            <div style={{ fontSize: "13.5px", fontWeight: "700", color: "#ffffff", marginBottom: "4px" }}>
+                              {curLayer.securityGuarantee.title}
+                            </div>
+                            <p style={{ margin: 0, fontSize: "12px", color: "var(--text-secondary)", lineHeight: "1.5" }}>
+                              {curLayer.securityGuarantee.description}
+                            </p>
+                          </div>
+
+                          {/* 2. Applicable Cryptographic Primitives & NIST Standards */}
+                          <div
+                            style={{
+                              background: "rgba(255, 255, 255, 0.025)",
+                              border: "1px solid rgba(255, 255, 255, 0.1)",
+                              borderRadius: "10px",
+                              padding: "14px",
+                            }}
+                          >
+                            <div style={{ fontSize: "11px", fontWeight: "800", color: "var(--text-muted)", letterSpacing: "0.5px", marginBottom: "10px" }}>
+                              CRYPTOGRAPHIC PRIMITIVES &amp; STANDARDS:
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                              {curLayer.primitives.map((prim, idx) => (
+                                <div
+                                  key={idx}
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    background: "rgba(255, 255, 255, 0.03)",
+                                    padding: "6px 10px",
+                                    borderRadius: "6px",
+                                    border: "1px solid rgba(255, 255, 255, 0.05)",
+                                    fontSize: "11.5px",
+                                  }}
+                                >
+                                  <span style={{ fontWeight: "700", color: "#ffffff" }}>{prim.name}</span>
+                                  <span style={{ color: "var(--text-secondary)" }}>{prim.spec}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* 3. Layer Invariants & Proof Verifications */}
+                          <div
+                            style={{
+                              background: "rgba(255, 255, 255, 0.025)",
+                              border: "1px solid rgba(255, 255, 255, 0.1)",
+                              borderRadius: "10px",
+                              padding: "14px",
+                            }}
+                          >
+                            <div style={{ fontSize: "11px", fontWeight: "800", color: "var(--text-muted)", letterSpacing: "0.5px", marginBottom: "8px" }}>
+                              SECURITY INVARIANTS &amp; PROOFS:
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                              {curLayer.invariants.map((inv, idx) => (
+                                <div key={idx} style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "11.5px", color: "var(--text-secondary)" }}>
+                                  <span style={{ color: "#ffffff", fontWeight: "700" }}>✓</span>
+                                  <span>{inv}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* 4. Live Ledger Status Card */}
+                          <div
+                            style={{
+                              background: "rgba(255, 255, 255, 0.025)",
+                              border: "1px solid rgba(255, 255, 255, 0.1)",
+                              borderRadius: "10px",
+                              padding: "14px",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                              <span style={{ fontSize: "11px", fontWeight: "800", color: "var(--text-muted)", letterSpacing: "0.5px" }}>
+                                MERKLE LEDGER STATE:
+                              </span>
+                              <span className="card-badge" style={{ fontSize: "9.5px", padding: "1px 6px" }}>
+                                {backendOnline ? "Online & Synchronized" : "Offline"}
+                              </span>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#ffffff", fontWeight: "600" }}>
+                              <span>🏛️</span>
+                              <span>Current Chain Length: Block #{ledgerData?.chain_length ?? 0}</span>
+                            </div>
+                            <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
+                              SHA-256 parent hash verification automatically confirms integrity on every query.
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    /* FLOWCHART VIEW 2: 4-COLUMN OVERVIEW MATRIX */
+                    <div
+                      style={{
+                        background: "rgba(10, 12, 16, 0.65)",
+                        border: "1px solid rgba(255, 255, 255, 0.08)",
+                        borderRadius: "12px",
+                        padding: "20px 16px",
+                        position: "relative",
+                        backgroundImage: "radial-gradient(circle, rgba(255, 255, 255, 0.04) 1px, transparent 1px)",
+                        backgroundSize: "20px 20px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                          gap: "14px",
+                        }}
+                      >
+                        {flowchartLayers.map((layer) => (
+                          <div
+                            key={layer.id}
+                            style={{
+                              background: "rgba(255, 255, 255, 0.025)",
+                              border: activeFlowchartLayer === layer.id ? "1.5px solid #ffffff" : "1px solid rgba(255, 255, 255, 0.12)",
+                              borderRadius: "10px",
+                              padding: "16px 14px",
+                              display: "flex",
+                              flexDirection: "column",
+                              justifyContent: "space-between",
+                            }}
+                          >
+                            <div>
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                                <span style={{ fontSize: "10.5px", fontWeight: "800", color: "#ffffff", letterSpacing: "0.5px", background: "rgba(255, 255, 255, 0.12)", padding: "3px 8px", borderRadius: "4px" }}>
+                                  LAYER 0{layer.id}
+                                </span>
+                                <span className="card-badge" style={{ fontSize: "9.5px", padding: "2px 6px" }}>
+                                  {layer.shortTech}
+                                </span>
+                              </div>
+                              <div style={{ fontSize: "13.5px", fontWeight: "700", color: "#ffffff", marginBottom: "4px", display: "flex", alignItems: "center", gap: "6px" }}>
+                                <span>{layer.icon}</span>
+                                <span>{layer.name}</span>
+                              </div>
+                              <div style={{ fontSize: "11px", color: "var(--text-muted)", marginBottom: "12px" }}>
+                                {layer.subtitle}
+                              </div>
+
+                              {/* Steps with Flow Arrows */}
+                              <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                                {layer.steps.slice(0, 3).map((st, i) => (
+                                  <React.Fragment key={st.number}>
+                                    <div style={{ background: "rgba(255, 255, 255, 0.03)", padding: "6px 8px", borderRadius: "6px", border: "1px solid rgba(255, 255, 255, 0.06)", fontSize: "11px", color: "var(--text-secondary)" }}>
+                                      <span style={{ color: "#ffffff", fontWeight: "600" }}>{st.number}. {st.name}:</span> {st.description.slice(0, 70)}...
+                                    </div>
+                                    {i < 2 && <FlowArrowDown />}
+                                  </React.Fragment>
+                                ))}
+                              </div>
+                            </div>
+
+                            <div style={{ marginTop: "14px", paddingTop: "10px", borderTop: "1px solid rgba(255, 255, 255, 0.08)", fontSize: "10.5px" }}>
+                              <button
+                                onClick={() => {
+                                  setActiveFlowchartLayer(layer.id);
+                                  setFlowchartViewMode("detailed");
+                                }}
+                                className="card-badge"
+                                style={{ width: "100%", textAlign: "center", background: "rgba(255,255,255,0.08)", color: "#ffffff", cursor: "pointer", padding: "6px 0", fontWeight: "600" }}
+                              >
+                                View Layer {layer.id} Detailed Flowchart ──►
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Inter-layer conduit arrows */}
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-around",
+                          alignItems: "center",
+                          marginTop: "16px",
+                          padding: "10px 14px",
+                          background: "rgba(255, 255, 255, 0.02)",
+                          borderRadius: "8px",
+                          border: "1px solid rgba(255, 255, 255, 0.07)",
+                          fontSize: "11px",
+                          color: "var(--text-secondary)",
+                          overflowX: "auto",
+                          gap: "8px",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px", whiteSpace: "nowrap" }}>
+                          <span style={{ color: "#ffffff", fontWeight: "700" }}>[Layer 1]</span>
+                          <span style={{ color: "rgba(255,255,255,0.4)" }}>──►</span>
+                          <span style={{ fontSize: "10.5px", color: "var(--text-muted)" }}>Ciphertext Bundle</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px", whiteSpace: "nowrap" }}>
+                          <span style={{ color: "#ffffff", fontWeight: "700" }}>[Layer 2]</span>
+                          <span style={{ color: "rgba(255,255,255,0.4)" }}>──►</span>
+                          <span style={{ fontSize: "10.5px", color: "var(--text-muted)" }}>Watermarked Release</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px", whiteSpace: "nowrap" }}>
+                          <span style={{ color: "#ffffff", fontWeight: "700" }}>[Layer 3]</span>
+                          <span style={{ color: "rgba(255,255,255,0.4)" }}>──►</span>
+                          <span style={{ fontSize: "10.5px", color: "var(--text-muted)" }}>Leaked File Intercepted</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "6px", whiteSpace: "nowrap" }}>
+                          <span style={{ color: "#ffffff", fontWeight: "700" }}>[Layer 4]</span>
+                          <span style={{ color: "rgba(255,255,255,0.4)" }}>──►</span>
+                          <span style={{ fontSize: "10.5px", color: "#ffffff", fontWeight: "600" }}>⚖️ Court Evidence Issued</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Bottom Pipeline Guarantees Bar */}
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: "10px",
+                      marginTop: "14px",
+                      padding: "10px 14px",
+                      background: "rgba(255, 255, 255, 0.02)",
+                      borderRadius: "8px",
+                      border: "1px solid rgba(255, 255, 255, 0.06)",
+                      fontSize: "11px",
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <span style={{ color: "#ffffff", fontWeight: "600" }}>Pipeline Architecture:</span>
+                      <span>Pure Python Reference PQC (FIPS 203 ML-KEM-768 &amp; FIPS 204 ML-DSA-65)</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "14px" }}>
+                      <span>✓ 4 Discrete Protection Layers</span>
+                      <span>✓ 100% Non-Repudiation</span>
+                      <span>✓ Instant Tamper Rejection</span>
+                      <span>✓ Section 65B(4) Certified</span>
+                    </div>
+                  </div>
+                </section>
+              );
+            })()}
           </>
         )}
 
@@ -1602,7 +2510,7 @@ startxref
                   <input
                     className="form-input"
                     type="text"
-                    placeholder="e.g. Alice Vance"
+                    placeholder="e.g. Officer Name"
                     value={enrollName}
                     onChange={(e) => setEnrollName(e.target.value)}
                     required
@@ -1628,6 +2536,19 @@ startxref
                     onChange={(e) => setEnrollCustomId(e.target.value)}
                   />
                 </div>
+                <div className="form-group">
+                  <label className="form-label">Default Access Password</label>
+                  <input
+                    className="form-input"
+                    type="text"
+                    value="123456"
+                    disabled
+                    style={{ opacity: 0.85, background: "rgba(255,255,255,0.04)" }}
+                  />
+                  <span style={{ fontSize: "10.5px", color: "var(--text-muted)", marginTop: "4px" }}>
+                    Standardized default password: "123456" (Argon2id hashed on enrollment)
+                  </span>
+                </div>
               </div>
 
               <button
@@ -1651,11 +2572,31 @@ startxref
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: "12px" }}>
                 {recipients.map((r) => (
-                  <div key={r.recipient_id} className="portfolio-mini-card">
+                  <div
+                    key={r.recipient_id}
+                    className="portfolio-mini-card"
+                    style={r.is_flagged ? { border: "1px solid rgba(239, 68, 68, 0.45)", background: "rgba(35, 8, 8, 0.35)" } : {}}
+                  >
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span style={{ fontWeight: "700", color: "var(--text-primary)", fontSize: "13.5px" }}>{r.name}</span>
                       <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                        <span className="key-badge-green">● Active</span>
+                        {r.is_flagged ? (
+                          <span
+                            style={{
+                              background: "rgba(239, 68, 68, 0.25)",
+                              color: "#fca5a5",
+                              border: "1px solid rgba(239, 68, 68, 0.45)",
+                              borderRadius: "4px",
+                              padding: "2px 8px",
+                              fontSize: "11px",
+                              fontWeight: "700",
+                            }}
+                          >
+                            🚩 FLAGGED
+                          </span>
+                        ) : (
+                          <span className="key-badge-green">● Active</span>
+                        )}
                         <button
                           className="btn-delete-recipient"
                           onClick={() => handleDeleteRecipient(r.recipient_id, r.name)}
@@ -1666,6 +2607,50 @@ startxref
                       </div>
                     </div>
                     <div style={{ fontSize: "11.5px", color: "var(--accent-pink)", marginTop: "3px", fontWeight: "500" }}>{r.role}</div>
+
+                    {/* FLAGGED REASON BADGE & RESTORE CLEARANCE */}
+                    {r.is_flagged && (
+                      <div
+                        style={{
+                          marginTop: "10px",
+                          background: "rgba(239, 68, 68, 0.15)",
+                          borderLeft: "3px solid #ef4444",
+                          padding: "6px 10px",
+                          borderRadius: "4px",
+                        }}
+                      >
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontSize: "10.5px", fontWeight: "800", color: "#f87171", textTransform: "uppercase" }}>
+                            Reason for Flagging:
+                          </span>
+                          <button
+                            onClick={() => handleUnflagRecipient(r.recipient_id)}
+                            style={{
+                              background: "rgba(255, 255, 255, 0.1)",
+                              border: "1px solid rgba(255, 255, 255, 0.2)",
+                              borderRadius: "3px",
+                              padding: "2px 6px",
+                              color: "#ffffff",
+                              fontSize: "10px",
+                              cursor: "pointer",
+                              fontWeight: "600",
+                            }}
+                            title="Restore officer clearance"
+                          >
+                            Restore Clearance
+                          </button>
+                        </div>
+                        <div style={{ fontSize: "11.5px", color: "#fecaca", marginTop: "3px", lineHeight: "1.35" }}>
+                          {r.flag_reason || "Hardware PrintScreen or Snipping Tool capture attempt intercepted"}
+                        </div>
+                        {r.total_violations && r.total_violations > 0 && (
+                          <div style={{ fontSize: "10px", color: "#f87171", marginTop: "3px" }}>
+                            ⚠️ {r.total_violations} Incident{r.total_violations > 1 ? "s" : ""} Recorded in Audit Ledger
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div
                       style={{
                         fontSize: "11px",
@@ -1884,19 +2869,20 @@ startxref
                       <div
                         key={r.recipient_id}
                         className={`custom-dropdown-item ${decryptSelectedRecipient === r.recipient_id ? "active" : ""}`}
+                        style={r.is_flagged ? { borderLeft: "3px solid #ef4444", background: "rgba(35, 10, 10, 0.4)" } : {}}
                         onClick={() => {
                           setDecryptSelectedRecipient(r.recipient_id);
                           setShowDecryptDropdown(false);
                         }}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0, flex: 1 }}>
-                          <span style={{ fontSize: "13px" }}>🛡️</span>
+                          <span style={{ fontSize: "13px" }}>{r.is_flagged ? "🚩" : "🛡️"}</span>
                           <div style={{ minWidth: 0, flex: 1 }}>
-                            <div style={{ fontSize: "12.5px", fontWeight: "600", color: "#ffffff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {r.name}
+                            <div style={{ fontSize: "12.5px", fontWeight: "600", color: r.is_flagged ? "#fca5a5" : "#ffffff", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {r.name} {r.is_flagged ? "• [FLAGGED: CLEARANCE SUSPENDED]" : ""}
                             </div>
-                            <div style={{ fontSize: "11px", color: "var(--text-muted)", fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                              {r.role} • {r.recipient_id}
+                            <div style={{ fontSize: "11px", color: r.is_flagged ? "#f87171" : "var(--text-muted)", fontFamily: "monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {r.is_flagged ? `Reason: ${r.flag_reason || "Screenshot Attempt"}` : `${r.role} • ${r.recipient_id}`}
                             </div>
                           </div>
                         </div>
@@ -1963,7 +2949,23 @@ startxref
                           {copy.watermark_hash.slice(0, 16)}...
                         </span>
                       </div>
-                      <div style={{ display: "flex", gap: "8px", marginTop: "12px" }}>
+                      <div style={{ display: "flex", gap: "8px", marginTop: "12px", flexWrap: "wrap" }}>
+                        <button
+                          className="card-badge"
+                          style={{ background: "rgba(255,255,255,0.18)", color: "#fff", cursor: "pointer", fontWeight: "700" }}
+                          onClick={() => {
+                            const rName = recipients.find((r) => r.recipient_id === rId)?.name || rId;
+                            setActiveSecureViewerCopy({
+                              recipientId: rId,
+                              recipientName: rName,
+                              documentHash: copy.document_hash,
+                              pdfBase64: copy.watermarked_pdf_base64,
+                              title: `${rName}'s Classified Intelligence Briefing`,
+                            });
+                          }}
+                        >
+                          🔒 Secure Viewer
+                        </button>
                         {copy.watermarked_pdf_base64 && (
                           <button
                             className="card-badge"
@@ -2104,109 +3106,76 @@ startxref
 
               {/* Instant Test Buttons for Recipient Copies */}
               <div style={{ marginBottom: "20px" }}>
-                <label className="form-label">Or Instant One-Click Test from Recipient Copies</label>
+                <label className="form-label">Instant Forensic Verification on Active Decrypted Copies</label>
                 <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginTop: "8px" }}>
-                  <button
-                    className="card-badge"
-                    style={{
-                      background: "rgba(255,255,255,0.08)",
-                      color: "#ffffff",
-                      cursor: "pointer",
-                      padding: "8px 14px",
-                    }}
-                    onClick={() => {
-                      const doc = sampleDocs.find((d) => d.recipient_id === "rec-alice-01");
-                      if (doc) {
-                        setLeakFileInput(null);
-                        handleAttribute(doc.pdf_base64, undefined, "Alice Vance's Watermarked Copy (rec-alice-01)");
-                      }
-                    }}
-                  >
-                    Test Alice&apos;s Copy (rec-alice-01)
-                  </button>
-                  <button
-                    className="card-badge"
-                    style={{
-                      background: "rgba(255,255,255,0.08)",
-                      color: "#ffffff",
-                      cursor: "pointer",
-                      padding: "8px 14px",
-                    }}
-                    onClick={() => {
-                      const doc = sampleDocs.find((d) => d.recipient_id === "rec-bob-02");
-                      if (doc) {
-                        setLeakFileInput(null);
-                        handleAttribute(doc.pdf_base64, undefined, "Bob Sterling's Watermarked Copy (rec-bob-02)");
-                      }
-                    }}
-                  >
-                    Test Bob&apos;s Copy (rec-bob-02)
-                  </button>
-                  <button
-                    className="card-badge"
-                    style={{
-                      background: "rgba(255,255,255,0.08)",
-                      color: "#ffffff",
-                      cursor: "pointer",
-                      padding: "8px 14px",
-                    }}
-                    onClick={() => {
-                      const doc = sampleDocs.find((d) => d.recipient_id === "rec-charlie-03");
-                      if (doc) {
-                        setLeakFileInput(null);
-                        handleAttribute(doc.pdf_base64, undefined, "Charlie Miller's Watermarked Copy (rec-charlie-03)");
-                      }
-                    }}
-                  >
-                    Test Charlie&apos;s Copy (rec-charlie-03)
-                  </button>
-                  <button
-                    className="card-badge"
-                    style={{
-                      background: "rgba(255,255,255,0.06)",
-                      color: "#cbd5e1",
-                      cursor: "pointer",
-                      padding: "8px 14px",
-                    }}
-                    onClick={() => {
-                      const doc = sampleDocs.find((d) => d.filename === "sample_briefing.pdf");
-                      if (doc) {
-                        setLeakFileInput(null);
-                        handleAttribute(doc.pdf_base64, undefined, "Clean Original Dossier (Unwatermarked)");
-                      }
-                    }}
-                  >
-                    Test Unwatermarked Original
-                  </button>
-                  <button
-                    className="card-badge"
-                    style={{
-                      background: "rgba(239, 68, 68, 0.12)",
-                      color: "#f87171",
-                      border: "1px solid rgba(239, 68, 68, 0.45)",
-                      cursor: "pointer",
-                      padding: "8px 14px",
-                      fontWeight: "600",
-                    }}
-                    onClick={() => {
-                      const doc = sampleDocs.find((d) => d.recipient_id === "rec-alice-01") || sampleDocs[0];
-                      if (doc && doc.pdf_base64) {
-                        setLeakFileInput(null);
-                        try {
-                          const binary = atob(doc.pdf_base64);
-                          // Tamper with hash characters to simulate forgery/alteration
-                          const tampered = binary.includes("watermark_hash")
-                            ? binary.replace(/"watermark_hash"\s*:\s*"([a-f0-9]{64})"/g, (_, h) => `"watermark_hash":"deadbeef${h.slice(8)}"`)
-                            : binary.slice(0, -30) + "%deadbeef00000000" + binary.slice(-14);
-                          handleAttribute(btoa(tampered), undefined, "Simulated Tampered Attack on Alice's Copy (Altered Watermark 'deadbeef...')");
-                        } catch {
-                          handleAttribute(doc.pdf_base64, undefined, "Simulated Tampered Copy");
+                  {Object.entries(decryptedCopies).map(([rId, copy]) => {
+                    const officer = recipients.find((r) => r.recipient_id === rId);
+                    const officerName = officer?.name || rId;
+                    return (
+                      <button
+                        key={rId}
+                        className="card-badge"
+                        style={{
+                          background: "rgba(255,255,255,0.08)",
+                          color: "#ffffff",
+                          cursor: "pointer",
+                          padding: "8px 14px",
+                        }}
+                        onClick={() => {
+                          if (copy.watermarked_pdf_base64) {
+                            setLeakFileInput(null);
+                            handleAttribute(
+                              copy.watermarked_pdf_base64,
+                              undefined,
+                              `${officerName}'s Watermarked Copy (${rId})`
+                            );
+                          }
+                        }}
+                      >
+                        🎯 Test {officerName}&apos;s Copy
+                      </button>
+                    );
+                  })}
+                  {Object.keys(decryptedCopies).length > 0 ? (
+                    <button
+                      className="card-badge"
+                      style={{
+                        background: "rgba(239, 68, 68, 0.12)",
+                        color: "#f87171",
+                        border: "1px solid rgba(239, 68, 68, 0.45)",
+                        cursor: "pointer",
+                        padding: "8px 14px",
+                        fontWeight: "600",
+                      }}
+                      onClick={() => {
+                        const firstCopy = Object.values(decryptedCopies)[0];
+                        const firstId = Object.keys(decryptedCopies)[0];
+                        const officerName = recipients.find((r) => r.recipient_id === firstId)?.name || firstId;
+                        if (firstCopy && firstCopy.watermarked_pdf_base64) {
+                          setLeakFileInput(null);
+                          try {
+                            const binary = atob(firstCopy.watermarked_pdf_base64);
+                            const tampered = binary.includes("watermark_hash")
+                              ? binary.replace(/"watermark_hash"\s*:\s*"([a-f0-9]{64})"/g, (_, h) => `"watermark_hash":"deadbeef${h.slice(8)}"`)
+                              : binary.slice(0, -30) + "%deadbeef00000000" + binary.slice(-14);
+                            handleAttribute(
+                              btoa(tampered),
+                              undefined,
+                              `Simulated Tampered Attack on ${officerName}'s Copy (Altered Watermark 'deadbeef...')`
+                            );
+                          } catch {
+                            handleAttribute(firstCopy.watermarked_pdf_base64, undefined, "Simulated Tampered Copy");
+                          }
                         }
-                      }
-                    }}
-                  >
-                    🚨 Simulate Tamper Attack on Alice&apos;s Copy
-                  </button>
+                      }}
+                    >
+                      🚨 Simulate Tamper Attack on Active Copy
+                    </button>
+                  ) : (
+                    <span style={{ fontSize: "12px", color: "var(--text-muted)", fontStyle: "italic" }}>
+                      No decrypted copies in active session. Encrypt &amp; decrypt a document above, or drag and drop any PDF below.
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -2643,7 +3612,7 @@ startxref
             </div>
             <div className="modal-body">
               <p style={{ fontSize: "13px", color: "var(--text-secondary)", lineHeight: 1.5 }}>
-                NayanX enforces an offline air-gapped cryptographic boundary conforming to US NIST FIPS 203 and FIPS 204.
+                WebEye enforces an offline air-gapped cryptographic boundary conforming to US NIST FIPS 203 and FIPS 204.
               </p>
 
               <table className="spec-table">
@@ -2767,37 +3736,62 @@ startxref
               </button>
             </div>
             <div className="modal-body">
-              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                <div className="portfolio-mini-card">
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontWeight: "700", color: "var(--text-primary)" }}>Air-Gap Integrity Check</span>
-                    <span className="key-badge-green">● PASS</span>
-                  </div>
-                  <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
-                    All post-quantum ML-KEM-768 and ML-DSA-65 algorithms operating in isolated enclave.
-                  </p>
+              {securityNotifications.length === 0 ? (
+                <div style={{ textAlign: "center", padding: "24px 12px", color: "var(--text-muted)", fontSize: "12px" }}>
+                  <span style={{ fontSize: "28px", display: "block", marginBottom: "8px" }}>🛡️</span>
+                  Zero active security violations recorded. Enclave perimeter fully secure.
                 </div>
-
-                <div className="portfolio-mini-card">
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontWeight: "700", color: "var(--text-primary)" }}>Audit Ledger Blocks Verified</span>
-                    <span className="key-badge-green">● {ledgerData?.chain_length || 0} BLOCKS</span>
-                  </div>
-                  <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
-                    Hash chaining verified across all officer decryption events.
-                  </p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                  {securityNotifications.map((notif) => (
+                    <div
+                      key={notif.id}
+                      className="portfolio-mini-card"
+                      style={{
+                        borderLeft: notif.is_read ? "3px solid #64748b" : "3px solid #ef4444",
+                        background: notif.is_read ? "rgba(255,255,255,0.02)" : "rgba(239, 68, 68, 0.1)",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontWeight: "700", color: notif.is_read ? "#94a3b8" : "#fca5a5" }}>
+                          🚨 {notif.violation_type || "SCREENSHOT_ATTEMPT"}
+                        </span>
+                        <span style={{ fontSize: "10px", color: "var(--text-muted)", fontFamily: "monospace" }}>
+                          {new Date(notif.timestamp).toLocaleString()}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: "12px", color: "#ffffff", marginTop: "4px" }}>
+                        Officer: <strong>{notif.recipient_name}</strong> ({notif.recipient_id})
+                      </div>
+                      <p style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: "2px" }}>
+                        {notif.reason}
+                      </p>
+                      <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+                        {!notif.is_read && (
+                          <button
+                            className="card-badge"
+                            style={{ background: "#ef4444", color: "#fff", cursor: "pointer", padding: "3px 8px", fontSize: "10px" }}
+                            onClick={() => dismissNotification(notif.id)}
+                          >
+                            Mark Reviewed
+                          </button>
+                        )}
+                        <button
+                          className="card-badge"
+                          style={{ background: "rgba(255,255,255,0.1)", color: "#fff", cursor: "pointer", padding: "3px 8px", fontSize: "10px" }}
+                          onClick={async () => {
+                            await fetch(`${API_BASE}/recipients/${notif.recipient_id}/unflag`, { method: "POST" });
+                            fetchRecipients();
+                            dismissNotification(notif.id);
+                          }}
+                        >
+                          Clear Flag &amp; Restore Clearance
+                        </button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-
-                <div className="portfolio-mini-card">
-                  <div style={{ display: "flex", justifyContent: "space-between" }}>
-                    <span style={{ fontWeight: "700", color: "var(--text-primary)" }}>Key Vault Authentication</span>
-                    <span className="key-badge-green">● SEALED</span>
-                  </div>
-                  <p style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }}>
-                    Private keys are protected by PBKDF2-HMAC-SHA256 authenticated envelope.
-                  </p>
-                </div>
-              </div>
+              )}
             </div>
           </div>
         </div>
@@ -2818,13 +3812,14 @@ startxref
             <div className="modal-body">
               <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "16px" }}>
                 <div className="user-avatar" style={{ width: "54px", height: "54px", fontSize: "18px" }}>
-                  S
+                  {currentUser?.username?.[0]?.toUpperCase() || "H"}
                 </div>
                 <div>
-                  <h3 style={{ fontSize: "16px", color: "var(--text-primary)", fontWeight: "700" }}>Sai</h3>
-                  <div style={{ fontSize: "12px", color: "#cbd5e1" }}>Chief Intelligence Analyst</div>
-                  <div style={{ fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }}>
-                    Clearance: Level 4 Top-Secret // Post-Quantum Cryptographic Attache
+                  <div style={{ fontSize: "16px", fontWeight: "700", color: "#ffffff" }}>
+                    {currentUser?.name || currentUser?.username || "Head Commander"}
+                  </div>
+                  <div style={{ fontSize: "11px", color: "var(--text-muted)", fontFamily: "monospace" }}>
+                    ROLE: {currentUser?.role?.toUpperCase() || "HEAD"} • SESSION: ACTIVE
                   </div>
                 </div>
               </div>
@@ -2832,7 +3827,7 @@ startxref
               <div className="portfolio-mini-card" style={{ marginBottom: "14px" }}>
                 <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>Enclave Station</div>
                 <div style={{ fontSize: "13px", fontWeight: "700", color: "var(--text-primary)", marginTop: "2px" }}>
-                  NayanX Air-Gap Node #01 (Offline Defense Enclave)
+                  WebEye Air-Gap Node #01 (Offline Defense Enclave)
                 </div>
               </div>
 
@@ -2842,6 +3837,38 @@ startxref
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* SECURE RECIPIENT VIEWER MODAL ENCLAVE */}
+      {activeSecureViewerCopy && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.88)",
+            backdropFilter: "blur(10px)",
+            zIndex: 99999,
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            padding: "20px",
+          }}
+        >
+          <div style={{ width: "100%", maxWidth: "1140px", maxHeight: "96vh", display: "flex", flexDirection: "column" }}>
+            <SecureViewer
+              recipientId={activeSecureViewerCopy.recipientId}
+              recipientName={activeSecureViewerCopy.recipientName}
+              documentHash={activeSecureViewerCopy.documentHash}
+              documentId={activeSecureViewerCopy.documentId}
+              pdfBase64={activeSecureViewerCopy.pdfBase64}
+              documentTitle={activeSecureViewerCopy.title || "Classified Operational Briefing"}
+              onClose={() => setActiveSecureViewerCopy(null)}
+            />
           </div>
         </div>
       )}

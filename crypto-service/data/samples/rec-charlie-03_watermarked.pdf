@@ -2,11 +2,11 @@
 %‚„œ”
 1 0 obj
 <<
-/Producer (Helios\055PQC\055ForensicEngine v2\0560 \050rec\055charlie\05503\051)
-/ForensicWatermark (\173\042algorithm\042\072 \042HMAC\055SHA256\042\054 \042document\137hash\042\072 \042da7624b1186b00c507a62f507717d452c67a11b8772496e8773cbca0ef086a8c\042\054 \042recipient\137id\042\072 \042rec\055charlie\05503\042\054 \042timestamp\042\072 \0422026\05509\05527T05\07248\07241\056979415\05300\07200\042\054 \042watermark\137hash\042\072 \042c5f20fb9e745b176bb51e706a3790642873d9499f5c1c51793cc5a0378b9269d\042\175)
-/WatermarkHash (c5f20fb9e745b176bb51e706a3790642873d9499f5c1c51793cc5a0378b9269d)
-/Subject (Classified Forensic Document \055 Hash c5f20fb9e745b176)
-/Keywords (pqc\073ml\055kem\055768\073ml\055dsa\05565\073wm\072c5f20fb9e745b176bb51e706a3790642873d9499f5c1c51793cc5a0378b9269d)
+/Producer (NayanX\055PQC\055ForensicEngine v2\0560 \050rec\055charlie\05503\051)
+/ForensicWatermark (\173\042algorithm\042\072 \042HMAC\055SHA256\042\054 \042document\137hash\042\072 \0422e30200e7a7230ab8794a511728d173d20cd6a8b658bf8836903bcc4591fd702\042\054 \042recipient\137id\042\072 \042rec\055charlie\05503\042\054 \042timestamp\042\072 \0422026\05509\05530T06\07251\07234\056978746\05300\07200\042\054 \042watermark\137hash\042\072 \04227452dbe90c84d8cffb77f035329f4115cd0d20eb266de30b656c17deb8afab0\042\175)
+/WatermarkHash (27452dbe90c84d8cffb77f035329f4115cd0d20eb266de30b656c17deb8afab0)
+/Subject (Classified Forensic Document \055 Hash 27452dbe90c84d8c)
+/Keywords (pqc\073ml\055kem\055768\073ml\055dsa\05565\073wm\07227452dbe90c84d8cffb77f035329f4115cd0d20eb266de30b656c17deb8afab0)
 >>
 endobj
 2 0 obj
@@ -21,8 +21,8 @@ endobj
 /Type /Catalog
 /Pages 2 0 R
 /Outlines 9 0 R
-/ForensicPayload (\173\042algorithm\042\072 \042HMAC\055SHA256\042\054 \042document\137hash\042\072 \042da7624b1186b00c507a62f507717d452c67a11b8772496e8773cbca0ef086a8c\042\054 \042recipient\137id\042\072 \042rec\055charlie\05503\042\054 \042timestamp\042\072 \0422026\05509\05527T05\07248\07241\056979415\05300\07200\042\054 \042watermark\137hash\042\072 \042c5f20fb9e745b176bb51e706a3790642873d9499f5c1c51793cc5a0378b9269d\042\175)
-/ForensicHash (c5f20fb9e745b176bb51e706a3790642873d9499f5c1c51793cc5a0378b9269d)
+/ForensicPayload (\173\042algorithm\042\072 \042HMAC\055SHA256\042\054 \042document\137hash\042\072 \0422e30200e7a7230ab8794a511728d173d20cd6a8b658bf8836903bcc4591fd702\042\054 \042recipient\137id\042\072 \042rec\055charlie\05503\042\054 \042timestamp\042\072 \0422026\05509\05530T06\07251\07234\056978746\05300\07200\042\054 \042watermark\137hash\042\072 \04227452dbe90c84d8cffb77f035329f4115cd0d20eb266de30b656c17deb8afab0\042\175)
+/ForensicHash (27452dbe90c84d8cffb77f035329f4115cd0d20eb266de30b656c17deb8afab0)
 >>
 endobj
 4 0 obj
@@ -43,10 +43,10 @@ endobj
 5 0 obj
 <<
 /Filter [ /ASCII85Decode /FlateDecode ]
-/Length 1091
+/Length 1097
 >>
 stream
-Gas2HgMWcW&;KZP'QpgPN!/*ea;qO*Q<aa.J6*C52f36_4b3epNBQ-rhZ>kQ7uAm/5VBX^3rV0RGj48%Vu[r\\=`)[)j"u'[o<b+"bc\>eTKKK>YoRfp,iFV_maaD"0nD94R*h'3-`M%5Z$*\T:cS)coO3E5^,\Q^1s/YirAkCD-PrP2WQ`C>GfMLiA?<S_aTf#&$Sa5>kr"I`;/[9k"-K2=YtiQ1^`DCr,`2>:WU;Ch2QDi,N]?O4@,j&+NpL)1_'"(M'!j9QB6gL1diG[&4EMg'J,U0$t`A&VpXO>p^E=1nT"Y0a#[=qC;-SB%Mf8lUH+YiRq""Xl?jJ/j(W![i@eC,P3j]/I9dM+KKgSnW?@?]S5euOGY'1Z.Tb.aAUBDU/ul'@^1/1J:!qRW9>L:&1m/W;QEWP>N-W9&>%V/U-G4eS?7:;Yc\h%5YBPNlGFN`\c*BTSm+4>lF%hp2di?Ja$3<@X8IKNSLO=Udj.g:4-^j<Im=51T\0>V@Q]/!r$5MB+hP>DVc(UlnQ4?4<JEcn91KBfjJ7uWn,s(5)pmuVEE',&.XW["k'l^sg$7trkXIC8pPRY\S"k(S",M7KJ)F4b^ZC>gfo1-=`$'#601!jnX=C(Y6o/aaKF??>O&]W3Wj$RXYD(.-'L81/ErY!5(`=8L#N^-g&'u,Qirn=SKSu)]1!WAk"A=XENh2fPXX"%63Q8X?cNYS?.i:?L@/T7;aELsnQ)5iL%:@='L*JV](*j5Ci:<c][j@)LV$bBgqC#))2G7nXAQGajRnJ;fD'?ZWJ=?T6bK$!'GBJ%h#H_,\$HRm_i3tH9%G_U1KVZMXKkrO3YLZX"1Lg[U%6*T0$+akGs@B]Bh'40$obA)VBKsu,c&]6N))+PrIjp(Dqem"Ahh4meF8T<A)E0aH_StFc2]"XrM*iPZEU]09%1JHPVoP&nTE'P_hW,tad)Jn.Ih^Z\oWp(H``i<4Nj_LgNfLX9]IS5q9hOl+m'cHPeWgUfsBGSU5'J*(T:oTd0_g.?X^oLnR&-jjSr8U/?KD\(un`)a"-B#'#M:&t':ki%cPeY!Xr&7kCr"c,U'VC<$0_lgQK&&T~>
+Gas2H?#u`2'Sc)T($B=I10"sUDfS>^Zg8TM!N.hU\S7bfhEXFcNK3o%pOFSF4,HB4P_VHKq0WM4G`gsV<rht4gs-0:"0r@I9=#b16^Wii6<qQO5pNu.Gm7r:D\:u[gl;LYF`eWC4QO$q)/R$Jcim`h*?5t_m(oB>G)-*\1YK4P[<9P?ppNlU5Jftr^PDD/:@DR.VqLjK<NsPFO"cKUE03U'\5/i<(+gSF+SuDLmq6ime@p+#OLMIoa"^A[aZN,CBGO<o/;b6fOMsj`_atK8Rp-/mAGcuiQf/XU;48fYrMol+il1i[JuK35YX$ZcSbN[q#4&$GQT:O&1q)Oo)NEdJU'Z=T]Mj4(+RQ1das6fgEPj&%]G@l-7k+kGfWXNPrLC(]'u@<`!mr.FnJ7!Cmj]Xui-Q\a`H&p)=<Ct&H,;+9VI8U74F_^JO8fV1a0+GchZ2YCD:Zfe9nT]\5Mp,rA%EqTk!1g]#fI;^QHNdek6!O_*dK>@`Drg<$PYu\`f`2b_<JOA:pM\8:%K/u+%fRM=Wd8N(a0"*e6r+_@b$n^kZe*(Hf">MnR/H-Ou>Cn_Z?efZ/@:>Xuf<TeY%'oBW$$]jSr\',g1JNYJP/&+5k]T3$,/4:WI>1<RiPBlNfT+m`,'_Ee1s8k[UA^_aH5^"e$n&Y@'n'?3*+T!44UcM2PKhcODPXBkj<,cs7OthC?Y!h-`A7Z@k*<Be>`dGtuO(Y"g(CiX4BXk36rVEU*>\jA%_dTqC]FmVAHkWHhtZ7:&mIK(dhH<jbbHXb$n<V=4_<r4)mOj`jE;XI`m*ajoqIBJ%h#H_,UuHR&>-3tF"2G_QL4B+fupDHhKiL\c-=W8t%n6Eo9%+aG)mI]rH=:m&)5b:8A_Ksu,c&]6Q*)+PrIjp(GBf39#@h.'897<.!pJ!QB[Sfc^\\\=iN*b_-ZUB'?'1JHPVjC*^>E'PklW/.TD"h*e-D^D2(c1DHsZ"fSAq)XBl2H':_2lS"ZofD)^+X>i874.P6(/;\8('ScD-kttn.WH4L:[i0;/hDUP@.F!':']IaG2gPF4Gi6nQP-'=KqJjXOsk[/H2&VShn=lp/W.ln@2SqJF'@CD~>
 endstream
 endobj
 6 0 obj
@@ -85,10 +85,10 @@ xref
 0000000890 00000 n 
 0000001470 00000 n 
 0000001659 00000 n 
-0000002842 00000 n 
-0000002883 00000 n 
-0000002990 00000 n 
-0000003102 00000 n 
+0000002848 00000 n 
+0000002889 00000 n 
+0000002996 00000 n 
+0000003108 00000 n 
 trailer
 <<
 /Size 10
@@ -96,9 +96,9 @@ trailer
 /Info 1 0 R
 >>
 startxref
-3123
+3129
 %%EOF
 
 %FORENSIC-WATERMARK-START
-%{"algorithm": "HMAC-SHA256", "document_hash": "da7624b1186b00c507a62f507717d452c67a11b8772496e8773cbca0ef086a8c", "recipient_id": "rec-charlie-03", "timestamp": "2026-09-27T05:48:41.979415+00:00", "watermark_hash": "c5f20fb9e745b176bb51e706a3790642873d9499f5c1c51793cc5a0378b9269d"}
+%{"algorithm": "HMAC-SHA256", "document_hash": "2e30200e7a7230ab8794a511728d173d20cd6a8b658bf8836903bcc4591fd702", "recipient_id": "rec-charlie-03", "timestamp": "2026-09-30T06:51:34.978746+00:00", "watermark_hash": "27452dbe90c84d8cffb77f035329f4115cd0d20eb266de30b656c17deb8afab0"}
 %FORENSIC-WATERMARK-END

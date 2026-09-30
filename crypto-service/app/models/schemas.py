@@ -24,6 +24,8 @@ class EnrollRequest(BaseModel):
     name: str = Field(..., description="Human-readable name of the recipient (e.g. 'Alice Chen')")
     recipient_id: Optional[str] = Field(None, description="Optional custom ID. Auto-generated if omitted.")
     role: Optional[str] = Field("Special Analyst", description="Role or classification clearance level")
+    username: Optional[str] = Field(None, description="Optional login username. If omitted, derived from recipient_id.")
+    password: Optional[str] = Field("123456", description="User login password (defaults to '123456').")
 
 
 class RecipientPublicRecord(BaseModel):
@@ -35,6 +37,19 @@ class RecipientPublicRecord(BaseModel):
     kem_public_key: str
     dsa_public_key: str
     created_at: str
+    username: Optional[str] = None
+    is_flagged: Optional[bool] = False
+    flag_reason: Optional[str] = None
+    flagged_at: Optional[str] = None
+    security_violations: Optional[List[Dict[str, Any]]] = None
+    total_violations: Optional[int] = 0
+
+
+class FlagRecipientRequest(BaseModel):
+    recipient_id: Optional[str] = None
+    violation_type: str = "SCREENSHOT_ATTEMPT"
+    reason: str = "Hardware PrintScreen or Snipping Tool capture attempt intercepted"
+    details: Optional[str] = None
 
 
 class RecipientCiphertextBundle(BaseModel):
